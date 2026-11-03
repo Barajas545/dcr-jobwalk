@@ -1,0 +1,8 @@
+# Keep LF everywhere (the code is served as-is; no CRLF churn on Windows).
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
+*.bcmap binary
+*.pfb binary
+*.ttf binary
