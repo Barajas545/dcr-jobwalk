@@ -1,0 +1,60 @@
+# Publishes DCR Job Walk to GitHub Pages: the app's own files and nothing else
+# (no docs, tests or tools). The custom domain (jobwalk.dcrframing.com) and
+# "Enforce HTTPS" are set in the repository's Pages settings; with an Actions
+# deploy no CNAME file is needed in the artifact.
+#
+# The unit tests run first on an LF checkout, the same way they run locally;
+# a red test stops the publish.
+name: Publish DCR Job Walk
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install the test-only dependency (fake-indexeddb)
+        run: npm ci
+      - name: Unit tests
+        run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Collect the app's files
+        run: |
+          mkdir _site
+          cp index.html manifest.webmanifest sw.js _site/
+          cp -r css js icons vendor viewer _site/
+          # The service worker precaches these; a missing one would break offline use.
+          for f in $(grep -oE "^  '[^']+'," sw.js | tr -d "', "); do
+            [ "$f" = "./" ] || [ -f "_site/$f" ] || { echo "sw.js lists $f but it is not in the site"; exit 1; }
+          done
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
