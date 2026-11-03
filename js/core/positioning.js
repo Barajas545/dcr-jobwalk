@@ -569,6 +569,8 @@ export class PositioningEngine extends Emitter {
           declination: d.declination,
         });
         this.sources = { gps: sim.gps, orientation: sim.orientation, motion: sim.motion, sim };
+        this.simRouteKey = null;
+        this.fitSimRouteToPlan();
       } else {
         const win = d.win();
         this.sources = {
@@ -672,6 +674,37 @@ export class PositioningEngine extends Emitter {
    * compass alignment. onOrigin({lat, lng}) is called once when the project
    * has no origin yet and a good fix (≤ 50 m) arrives.
    */
+  /**
+   * Demo mode on a calibrated plan: walk a loop inside the building (the
+   * middle half of the sheet) instead of the default 36 × 24 m loop, so the
+   * demo puts its pins and paths on the plan rather than beside it.
+   */
+  fitSimRouteToPlan() {
+    const sim = this.sources?.sim;
+    const cal = this.level?.calibration;
+    const plan = this.level?.plan;
+    if (!sim?.setRoute || !Array.isArray(cal?.toEnu) || !(plan?.width > 0) || !validOrigin(this.project?.origin)) return;
+    const key = `${this.level.id}:${cal.toEnu.join(',')}`;
+    if (this.simRouteKey === key) return;
+    this.simRouteKey = key;
+    const [a, b, c, d, tx, ty] = cal.toEnu;
+    // The calibration is in meters from the project's origin; the walker
+    // measures its route from its own origin (where it started, before the
+    // project had one), so each corner is moved into the walker's frame.
+    const po = validOrigin(this.project.origin);
+    const so = validOrigin(sim.origin) || po;
+    const at = (fx, fy) => {
+      const x = plan.width * fx, y = plan.height * fy;
+      const g = fromEnu(po, a * x + b * y + tx, c * x + d * y + ty);
+      return toEnu(so, g.lat, g.lng);
+    };
+    try {
+      sim.setRoute([{ ...at(0.28, 0.3), pause: 6 }, at(0.72, 0.3), { ...at(0.72, 0.7), pause: 6, roof: true }, { ...at(0.28, 0.7), roof: true }]);
+    } catch (err) {
+      console.warn('[positioning] demo route', err);
+    }
+  }
+
   setContext({ project = null, level = null, onOrigin = null } = {}) {
     const prevId = this.project?.id ?? null;
     this.project = project || null;
@@ -692,6 +725,7 @@ export class PositioningEngine extends Emitter {
       this.calKey = calKey;
     }
     if (cal) this.ensureCalibrationModule();
+    this.fitSimRouteToPlan();
 
     const po = validOrigin(this.project?.origin);
     if (po) {

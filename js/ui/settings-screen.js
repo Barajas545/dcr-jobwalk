@@ -7,7 +7,7 @@
 // only after it has been written.
 //
 // Also here, because they keep the work safe: the storage card (how much is
-// used and free, whether the browser may clear it, Protect storage, and what
+// used, whether the browser may clear it, Protect storage, and what
 // to do on an iPhone / Android / a computer), a link to Recently Deleted, and
 // an honest "How positioning works".
 
@@ -380,11 +380,10 @@ export async function open(ctx) {
     let info = {};
     try { info = await store.storageInfo(); } catch { /* unknown */ }
     if (closed) return;
-    const free = info.quota != null && info.usage != null ? Math.max(0, info.quota - info.usage) : null;
+    // Only what the app uses: browsers do not say how much space the phone has
+    // left (Chrome reports usage + 10 GB whatever is free; Safari only a
+    // ceiling). A full phone shows up as a failed save, reported loudly.
     const used = info.usage != null ? formatBytes(info.usage) : 'unknown';
-    const pct = info.quota ? Math.min(100, (info.usage / info.quota) * 100) : null;
-    const meter = pct != null ? el('div', { class: 'st-meter', role: 'meter', 'aria-valuemin': '0', 'aria-valuemax': '100', 'aria-valuenow': String(Math.round(pct)), 'aria-label': 'Storage used' },
-      el('div', { class: 'st-meter-fill', style: { width: `${Math.max(1, pct)}%` } })) : null;
     const state = info.persisted
       ? el('div', { class: 'banner ok' }, el('span', { html: icon('shield', { size: 20 }) }), el('span', {}, el('b', {}, 'Storage protected ✓'), ' The browser will not clear the app\'s data on its own.'))
       : el('div', { class: 'banner warn' }, el('span', { html: icon('warning', { size: 20 }) }),
@@ -399,8 +398,7 @@ export async function open(ctx) {
     storageCard.replaceChildren(
       el('div', { class: 'st-storage-nums' },
         el('div', {}, el('span', { class: 'st-big' }, used), el('span', { class: 'muted' }, ' used')),
-        free != null ? el('div', {}, el('span', { class: 'st-big' }, formatBytes(free)), el('span', { class: 'muted' }, ' available')) : null),
-      meter,
+        el('div', { class: 'muted small' }, 'Free space: see the phone’s Settings → Storage.')),
       state,
       !info.persisted && info.canPersist ? el('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: protect }, el('span', { html: icon('shield', { size: 20 }) }), 'Protect storage') : null,
       help(platform));

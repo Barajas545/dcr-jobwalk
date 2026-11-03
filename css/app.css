@@ -338,7 +338,7 @@ button.list-row:active { background: var(--surface-2); }
 .toast {
   pointer-events: auto;
   display: flex; align-items: center; gap: 10px;
-  max-width: 560px; width: max-content; min-height: 46px;
+  max-width: min(560px, calc(100vw - 24px)); width: max-content; min-height: 46px;
   padding: 10px 14px;
   border-radius: 12px;
   background: #1d2630; color: #fff;

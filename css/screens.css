@@ -146,7 +146,7 @@
 
 .pj-banners {
   position: absolute; top: 60px;
-  left: max(10px, var(--safe-left)); right: max(76px, calc(var(--safe-right) + 76px));
+  left: max(10px, var(--safe-left)); right: max(10px, var(--safe-right));
   max-width: 560px;
   display: flex; flex-direction: column; gap: 8px;
   pointer-events: none;

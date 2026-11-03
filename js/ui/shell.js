@@ -8,6 +8,26 @@
 import { icon } from './icons.js';
 import { escapeHtml, isIOS as isIOSDevice } from '../core/util.js';
 
+// The screens build their DOM as `node.append(a, cond ? b : null, …)`, the
+// same way el() takes children. The browser's own append / prepend /
+// replaceChildren would print a null as the word "null" on screen, so here
+// they skip null, undefined and false exactly as el() does. Done once, when
+// this module loads (every screen imports it).
+if (typeof Element !== 'undefined' && !Element.prototype.__jwSkipsEmpty) {
+  for (const proto of [Element.prototype, DocumentFragment.prototype, Document.prototype]) {
+    for (const name of ['append', 'prepend', 'replaceChildren']) {
+      const native = proto[name];
+      if (typeof native !== 'function') continue;
+      Object.defineProperty(proto, name, {
+        configurable: true,
+        writable: true,
+        value(...nodes) { return native.apply(this, nodes.filter((n) => n != null && n !== false)); },
+      });
+    }
+  }
+  Object.defineProperty(Element.prototype, '__jwSkipsEmpty', { value: true });
+}
+
 /**
  * el('button', {class: 'btn', onclick: fn, 'aria-label': 'Close'}, 'Text', childNode)
  * Attributes: `class`, `style` (string or object), `html` (innerHTML, trusted

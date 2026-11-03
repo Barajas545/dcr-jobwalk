@@ -235,9 +235,9 @@ export async function open(ctx) {
     if (closed) return;
     const parts = [];
     if (info.usage != null) parts.push(`Using ${formatBytes(info.usage)}`);
-    const free = info.quota != null && info.usage != null ? Math.max(0, info.quota - info.usage) : null;
-    if (free != null) parts.push(`about ${formatBytes(free)} free`);
-    const low = free != null && free < 500 * 1024 * 1024;
+    // No "free space" figure: browsers do not report it (Chrome's quota is
+    // usage + 10 GB whatever the phone has left; Safari's is only a ceiling).
+    // A full phone shows up as a failed save, which the app reports loudly.
     const kids = [el('span', { class: 'home-storage-ic', html: icon(info.persisted ? 'shield' : 'info', { size: 18 }) })];
     const text = el('span', { class: 'home-storage-text' }, parts.join(' · '));
     kids.push(text);
@@ -249,9 +249,8 @@ export async function open(ctx) {
     } else {
       text.append(parts.length ? ' · ' : '', el('span', {}, 'Back up after every walk'));
     }
-    storageHost.className = `home-storage${low ? ' low' : ''}${info.persisted ? ' protected' : ''}`;
+    storageHost.className = `home-storage${info.persisted ? ' protected' : ''}`;
     storageHost.replaceChildren(...kids);
-    if (low) storageHost.append(el('div', { class: 'home-storage-low' }, 'Space is getting low. Back up finished job walks and move them to Recently Deleted, then erase them there.'));
   }
 
   async function protect() {
