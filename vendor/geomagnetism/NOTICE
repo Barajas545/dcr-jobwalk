@@ -1,0 +1,19 @@
+DCR Job Walk — vendor/geomagnetism
+
+This folder contains a modified version of geomagnetism 0.2.0
+https://github.com/naturalatlas/geomagnetism
+https://www.npmjs.com/package/geomagnetism
+
+  Copyright (c) 2015-2024 Natural Atlas, Inc. & Contributors
+  Licensed under the Apache License, Version 2.0 (see LICENSE in this folder).
+
+Modifications (2026, for DCR Job Walk): the package's CommonJS files were
+merged into one ES module (index.js), only the WMM2025 coefficients were kept
+and inlined, unused code was removed, the decimal-year calculation accounts
+for leap years, the model's end date is NOAA's 2030.0, and helper functions
+(declination, declinationInfo, decimalYear, isValidDate) were added. The
+header of index.js lists every change.
+
+The World Magnetic Model 2025 (WMM2025) coefficients and test values come from
+NOAA's National Centers for Environmental Information (NCEI) and are in the
+public domain: https://www.ncei.noaa.gov/products/world-magnetic-model

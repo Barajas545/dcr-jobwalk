@@ -1,0 +1,59 @@
+/* export.css — Back up & share (js/ui/export-screen.js).
+ *
+ * Uses the tokens and components of css/app.css (cards, banners, switches,
+ * buttons) and only adds the layout of this screen. Light and dark come from
+ * the tokens.
+ */
+
+.export-screen { padding-top: 14px; }
+.export-screen .ex-status { margin-bottom: 12px; }
+.export-screen .ex-status .banner { align-items: flex-start; }
+.export-screen .ex-status-head { display: block; font-size: 15.5px; margin-bottom: 2px; }
+
+.ex-card h2 {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 18px; font-weight: 750; margin-bottom: 8px;
+}
+.ex-card > p { color: var(--text-muted); font-size: 14.5px; }
+.ex-ic {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 34px; height: 34px; border-radius: 10px;
+  background: var(--brand-tint); color: var(--brand);
+}
+
+.ex-counts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 14px 0 10px; }
+.ex-count { background: var(--surface-2); border-radius: var(--radius-sm); padding: 9px 4px 8px; text-align: center; min-width: 0; }
+.ex-count b { display: block; font-size: 21px; font-weight: 800; line-height: 1.1; }
+.ex-count span { display: block; font-size: 11.5px; font-weight: 650; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.ex-size { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 15px; padding: 6px 2px; }
+.ex-size b { font-size: 16px; }
+
+.ex-switch { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); margin: 6px 0 12px; padding: 6px 2px; cursor: pointer; }
+.ex-switch-text { display: flex; flex-direction: column; min-width: 0; }
+.ex-switch-label { font-weight: 650; }
+.ex-switch-detail { font-size: 13px; color: var(--text-muted); }
+.ex-switch input:disabled { opacity: 0.45; }
+
+.ex-warn { margin: 0 0 12px; font-size: 14px; }
+.ex-actions { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.ex-actions .btn-lg { min-height: 58px; }
+.ex-hint { margin: 10px 2px 0; }
+
+.ex-help ol { margin: 6px 0 10px; padding-left: 22px; }
+.ex-help li { margin-bottom: 9px; font-size: 14.5px; }
+.ex-help li::marker { color: var(--brand); font-weight: 800; }
+
+.ex-foot { text-align: center; margin-top: 18px; }
+
+/* The "Backup ready" sheet: one button per way of saving, with a line saying where it goes. */
+.ex-way { justify-content: flex-start; text-align: left; min-height: 60px; padding: 8px 16px; gap: 12px; }
+.ex-way-text { display: flex; flex-direction: column; align-items: flex-start; line-height: 1.25; min-width: 0; }
+.ex-way-detail { font-size: 12.5px; font-weight: 500; opacity: 0.82; white-space: normal; }
+.ex-ready { display: flex; align-items: center; gap: 12px; padding: 12px; margin: 4px 0 12px; background: var(--surface-2); border-radius: var(--radius); }
+.ex-ready-ic { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 48px; height: 48px; border-radius: 12px; background: var(--brand); color: #fff; }
+.ex-ready-name { font-weight: 700; overflow-wrap: anywhere; line-height: 1.3; }
+
+@media (max-width: 360px) {
+  .ex-counts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}

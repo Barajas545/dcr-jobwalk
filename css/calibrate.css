@@ -1,0 +1,393 @@
+/* calibrate.css — the calibration wizard (js/ui/calibrate-screen.js).
+ *
+ * The plan fills the screen; one step at a time sits in a panel below it on
+ * a phone (beside it on a wide screen or a phone held sideways), so the plan
+ * and the next button are both in reach of a thumb. Numbers that matter
+ * (precision, error) are big and bold for bright sun. Only the tokens from
+ * css/app.css are used, so light and dark both follow them.
+ */
+
+/* ---- layout ---------------------------------------------------------------- */
+
+.cal-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.cal-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 180px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cal-view { position: absolute; inset: 0; }
+
+.cal-overlay {
+  position: absolute;
+  z-index: 6;
+  top: 10px;
+  left: max(10px, var(--safe-left));
+  right: max(10px, var(--safe-right));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+.cal-overlay > * { pointer-events: auto; }
+.cal-chip { box-shadow: var(--shadow); }
+.cal-allow { min-height: 36px; box-shadow: var(--shadow); }
+
+.cal-panel {
+  position: relative;
+  z-index: 5;
+  flex: none;
+  max-height: 56%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding: 14px max(16px, var(--safe-right)) calc(16px + var(--safe-bottom)) max(16px, var(--safe-left));
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 18px rgba(16, 24, 40, 0.10);
+}
+.cal-panel.compact {
+  padding-top: 10px;
+  padding-bottom: calc(10px + var(--safe-bottom));
+}
+.cal-panel > * + * { margin-top: 10px; }
+.cal-panel p { margin: 0; }
+
+/* A mode with nothing to show on the plan (the compass needs a calibration first). */
+.cal-main.solo .cal-stage { display: none; }
+.cal-main.solo .cal-panel { flex: 1 1 auto; max-height: none; border-top: 0; box-shadow: none; }
+
+@media (min-width: 900px), (orientation: landscape) and (max-height: 560px) {
+  .cal-main { flex-direction: row; }
+  .cal-panel {
+    width: min(420px, 46%);
+    max-height: none;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    box-shadow: none;
+    padding-top: 16px;
+  }
+}
+
+.cal-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* ---- steps and text ----------------------------------------------------------- */
+
+.cal-steps { display: flex; flex-wrap: wrap; gap: 6px; }
+.cal-step {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+.cal-step.done { background: var(--ok); color: #fff; }
+.cal-step.now { border-color: var(--brand); background: var(--brand-tint); color: var(--brand); }
+.cal-step.done.now { background: var(--ok); color: #fff; }
+
+.cal-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 19px;
+  font-weight: 780;
+  line-height: 1.25;
+}
+.cal-h.cal-ok { color: var(--ok); }
+
+.cal-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 14.5px;
+}
+.cal-tip > span:first-child { flex: none; color: var(--accent); margin-top: 1px; }
+
+.cal-live {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text);
+}
+.cal-picking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 650;
+}
+.cal-picking > span:first-child { flex: none; color: var(--brand); }
+
+.cal-big {
+  font-size: 36px;
+  line-height: 1.1;
+  font-weight: 820;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.cal-banner { font-size: 14.5px; }
+.cal-banner-ic { flex: none; margin-top: 1px; }
+.cal-banner.warn .cal-banner-ic { color: var(--warn); }
+.cal-banner.err .cal-banner-ic { color: var(--danger); }
+.cal-banner.ok .cal-banner-ic { color: var(--ok); }
+.cal-banner:not(.warn):not(.err):not(.ok) .cal-banner-ic { color: var(--accent); }
+.cal-banner-t { display: block; margin-bottom: 2px; font-weight: 750; }
+.cal-banner .btn { margin-top: 8px; }
+
+.cal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.cal-actions > .btn { flex: 1 1 auto; }
+.cal-actions > .btn-ghost { flex: 0 1 auto; }
+
+/* ---- measuring ------------------------------------------------------------------ */
+
+.cal-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (min-width: 420px) {
+  .cal-panel .cal-stats { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (min-width: 900px) {
+  .cal-panel .cal-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.cal-stat {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.cal-stat .v {
+  font-size: 22px;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cal-stat .k {
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.cal-meter {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  background: var(--surface-3);
+  overflow: hidden;
+}
+.cal-meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.25s linear;
+}
+.cal-meter-min {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  opacity: 0.45;
+}
+
+/* ---- results ---------------------------------------------------------------------- */
+
+.cal-result > * + * { margin-top: 12px; }
+.cal-result-head { display: flex; align-items: center; gap: 12px; }
+.cal-result-acc {
+  font-size: 26px;
+  font-weight: 820;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Solid colours with strong text: readable in sun, and in both themes. */
+.cal-quality {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 0 14px;
+  border-radius: 17px;
+  font-size: 19px;   /* large bold text: white on green stays readable */
+  font-weight: 800;
+  white-space: nowrap;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.cal-quality.good { background: var(--ok); color: #fff; }
+.cal-quality.fair { background: var(--warn); color: #1d1500; }
+.cal-quality.poor { background: var(--danger); color: #fff; }
+.cal-quality.small { min-height: 24px; padding: 0 9px; border-radius: 12px; font-size: 13px; }
+.cal-quality.small.good { color: #04210f; }
+
+.cal-detail { color: var(--text); }
+.cal-prov {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 14.5px;
+}
+.cal-prov > .cal-quality { flex: none; }
+
+.cal-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 0;
+}
+.cal-facts dt { font-size: 13px; font-weight: 700; color: var(--text-muted); padding-top: 2px; }
+.cal-facts dd { margin: 0; font-weight: 700; }
+.cal-facts dd .s { font-size: 12.5px; font-weight: 500; color: var(--text-muted); }
+
+.cal-north { display: inline-flex; align-items: center; gap: 6px; vertical-align: middle; }
+.cal-north-ic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--brand);
+  transform-origin: 50% 50%;
+}
+
+.cal-result .section-title { margin: 14px 2px 6px; }
+.cal-points .list-row { min-height: 56px; gap: 10px; padding: 8px 8px 8px 12px; }
+.cal-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 800;
+  font-size: 14px;
+}
+.cal-num.good { background: var(--ok); color: #04210f; }   /* small digits: dark on green for contrast */
+.cal-num.fair { background: var(--warn); color: #1d1500; }
+.cal-num.poor { background: var(--danger); color: #fff; }
+
+.cal-warns { display: flex; flex-direction: column; gap: 8px; }
+.cal-warn-btn { margin-top: 8px; }
+.cal-before { margin: 0; }
+
+/* ---- scale line ---------------------------------------------------------------------- */
+
+.cal-len { font-size: 22px; font-weight: 700; min-height: 56px; letter-spacing: 0.02em; }
+.cal-echo { font-size: 17px; font-weight: 750; color: var(--ok); min-height: 1.4em; }
+.cal-echo.bad { color: var(--danger); }
+
+/* ---- compass dial -------------------------------------------------------------------- */
+
+.cal-dial-box { display: flex; align-items: center; gap: 14px; }
+.cal-dial svg { display: block; }
+.cal-dial .ring { fill: var(--surface-2); stroke: var(--border); stroke-width: 2; }
+.cal-dial .up { fill: var(--text-muted); font-size: 9px; font-weight: 700; font-family: var(--font); }
+.cal-dial .wall line { stroke: var(--brand); stroke-width: 5; stroke-linecap: round; }
+.cal-dial .wall path { fill: var(--brand); }
+.cal-dial .cam line { stroke: var(--me); stroke-width: 3; stroke-linecap: round; }
+.cal-dial .cam circle { fill: var(--me); }
+.cal-dial .hub { fill: var(--text); }
+.cal-dial-legend { display: flex; flex-direction: column; gap: 6px; font-weight: 650; }
+.cal-dial-legend .k { display: inline-flex; align-items: center; gap: 8px; }
+.cal-dial-legend .k::before { content: ""; width: 18px; height: 5px; border-radius: 3px; background: var(--brand); }
+.cal-dial-legend .k.cam::before { height: 3px; background: var(--me); }
+
+/* ---- satellite map alignment ---------------------------------------------------------- */
+
+.cal-seg { box-shadow: var(--shadow); margin-left: auto; }
+.cal-seg button { min-height: 40px; padding: 0 16px; }
+.cal-seg button:disabled { opacity: 0.5; }
+
+/* Phone: one view at a time. They stay laid out (visibility, not display),
+   so the map keeps its size and does not need to reload tiles on switch. */
+.cal-stage.cal-split[data-show="plan"] .cal-map,
+.cal-stage.cal-split[data-show="map"] .cal-plan {
+  visibility: hidden;
+  pointer-events: none;
+}
+@media (min-width: 900px) {
+  .cal-stage.cal-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 2px;
+    background: var(--border);
+  }
+  .cal-stage.cal-split .cal-view { position: relative; inset: auto; min-height: 0; background: var(--surface-3); }
+  .cal-stage.cal-split[data-show] .cal-map,
+  .cal-stage.cal-split[data-show] .cal-plan { visibility: visible; pointer-events: auto; }
+  .cal-stage.cal-split .cal-overlay { grid-column: 1 / -1; }
+  .cal-seg { display: none; }
+}
+
+.cal-search { display: flex; gap: 8px; margin: 0; }
+.cal-search .input { flex: 1 1 auto; min-width: 0; }
+.cal-search .btn { flex: none; }
+
+/* ---- start page ------------------------------------------------------------------------ */
+
+.cal-start > * + * { margin-top: 12px; }
+.cal-start .section-title { margin-top: 22px; margin-bottom: 8px; }
+.cal-status > * + * { margin-top: 10px; }
+.cal-opt { min-height: 72px; }
+.cal-opt .grow > .s { line-height: 1.35; }
+.cal-opt-ic {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--brand-tint);
+  color: var(--brand);
+}
+.list-row .cal-opt-ic .ic { color: var(--brand); }
+.cal-chev { flex: none; color: var(--text-faint); }
+.cal-howto h3 { font-size: 16px; margin-bottom: 8px; }
+.cal-howto p { font-size: 14.5px; }
+.cal-howto p:last-child { margin-bottom: 0; }

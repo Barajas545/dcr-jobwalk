@@ -1,0 +1,276 @@
+/* annotate.css — the markup editor (js/ui/annotate-screen.js).
+ *
+ * Always dark, like a camera, in both the light and the dark app theme: the
+ * photo is what matters, and dark surroundings make its colours (and the
+ * markup colours) easy to judge in any light. Controls are white on dark
+ * with big targets for one hand; the active tool uses the DCR red.
+ * Uses the app tokens (--tap, --safe-*, --brand, --topbar-h) and adds a few
+ * editor-only colours scoped to .annot — the app tokens are not changed.
+ * The shell's dialogs and sheets keep following the app theme.
+ */
+
+.screen.annot {
+  --an-bg: #0c0f13;
+  --an-bar: #161b22;
+  --an-bar-2: #222a35;
+  --an-line: rgba(255, 255, 255, 0.10);
+  --an-text: #f3f6f9;
+  --an-muted: #b9c4cf;
+  --an-sel: #4da3ff;
+  background: var(--an-bg);
+  color: var(--an-text);
+  color-scheme: dark;
+}
+
+.annot :focus-visible { outline: 2px solid var(--an-sel); outline-offset: 2px; }
+
+/* ---- top bar ------------------------------------------------------------------ */
+
+.annot-top {
+  flex: none;
+  display: flex; align-items: center; gap: 2px;
+  min-height: calc(var(--topbar-h) + var(--safe-top));
+  padding: var(--safe-top) max(8px, var(--safe-right)) 0 max(4px, var(--safe-left));
+  background: var(--an-bar);
+  border-bottom: 1px solid var(--an-line);
+  position: relative; z-index: 5;
+}
+.annot-top .topbar-title h1 { color: var(--an-text); }
+.annot-top .topbar-title .sub { color: var(--an-muted); }
+.annot .icon-btn { color: var(--an-text); }
+.annot .icon-btn:active { background: rgba(255, 255, 255, 0.12); }
+.annot .icon-btn:disabled { opacity: 0.32; }
+
+.annot-save {
+  position: relative;
+  min-height: 42px;
+  margin-left: 6px;
+  padding: 0 14px 0 11px;
+  gap: 6px;
+  border-radius: 10px;
+}
+/* A small amber dot: there are changes that Save will keep. */
+.annot-save.dirty::after {
+  content: "";
+  position: absolute; top: -4px; right: -4px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #ffc94d;
+  border: 2px solid var(--an-bar);
+}
+
+/* ---- the photo ----------------------------------------------------------------- */
+
+.annot-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--an-bg);
+  touch-action: none;           /* every touch is ours: draw, pinch, pan */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;  /* no iOS long-press menu or magnifier */
+  outline: none;
+}
+.annot-stage canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  max-width: none;
+  touch-action: none;
+}
+.annot-stage[data-cursor="draw"] { cursor: crosshair; }
+.annot-stage[data-cursor="place"] { cursor: copy; }
+.annot-stage[data-cursor="erase"] { cursor: cell; }
+.annot-stage[data-cursor="select"] { cursor: default; }
+.annot-stage[data-cursor="grab"] { cursor: grab; }
+.annot-stage[data-cursor="grabbing"] { cursor: grabbing; }
+
+/* Loading, and the friendly messages (a video, a missing file). */
+.annot-cover {
+  position: absolute; inset: 0; z-index: 4;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  padding: 24px max(20px, var(--safe-right)) calc(24px + var(--safe-bottom)) max(20px, var(--safe-left));
+  background: var(--an-bg);
+  text-align: center;
+}
+.annot-cover .spinner { border-color: rgba(255, 255, 255, 0.15); border-top-color: var(--brand); }
+.annot-cover-text { margin: 0; color: var(--an-muted); font-weight: 600; }
+.annot-msg { max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.annot-msg-ic {
+  width: 64px; height: 64px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--an-bar-2); color: var(--an-text);
+}
+.annot-msg h2 { font-size: 20px; font-weight: 750; color: var(--an-text); }
+.annot-msg p { margin: 0; color: var(--an-muted); line-height: 1.5; }
+.annot-msg-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 8px; }
+.annot-btn-dark { background: transparent; color: var(--an-text); border-color: rgba(255, 255, 255, 0.3); }
+.annot-btn-dark:active { background: rgba(255, 255, 255, 0.1); }
+
+/* The short tip at the top of the photo ("Drag to draw a box."). */
+.annot-hint {
+  position: absolute; left: 50%; top: 12px; z-index: 3;
+  max-width: calc(100% - 32px);
+  padding: 8px 14px;
+  border-radius: 18px;
+  background: rgba(12, 15, 19, 0.85);
+  color: #fff;
+  font-size: 14px; font-weight: 600; line-height: 1.3;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -6px);
+  transition: opacity 0.2s, transform 0.2s;
+}
+.annot-hint.on { opacity: 1; transform: translate(-50%, 0); }
+
+.annot-fit {
+  position: absolute; z-index: 3;
+  right: max(12px, var(--safe-right)); bottom: 12px;
+  width: var(--tap); height: var(--tap);
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(22, 27, 34, 0.9);
+  color: #fff;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  touch-action: manipulation;
+}
+.annot-fit:active { transform: scale(0.95); }
+
+/* Edit / Delete for the selected mark, floating within thumb reach. */
+.annot-selbar {
+  position: absolute; z-index: 3;
+  left: 50%; bottom: 12px;
+  transform: translateX(-50%);
+  display: flex; gap: 4px;
+  padding: 5px;
+  border-radius: 16px;
+  background: rgba(22, 27, 34, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+.annot-selbtn {
+  display: inline-flex; align-items: center; gap: 7px;
+  min-height: 44px; padding: 0 16px;
+  border: 0; border-radius: 12px;
+  background: transparent; color: #fff;
+  font-size: 15px; font-weight: 650;
+  touch-action: manipulation;
+}
+.annot-selbtn:active { background: rgba(255, 255, 255, 0.12); }
+.annot-selbtn.danger { color: #ff8f80; }
+
+/* ---- colours and sizes ------------------------------------------------------------ */
+
+.annot-opts {
+  flex: none;
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px max(8px, var(--safe-right)) 2px max(8px, var(--safe-left));
+  background: var(--an-bar);
+  border-top: 1px solid var(--an-line);
+  overflow-x: auto;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  transition: opacity 0.15s;
+}
+.annot-opts::-webkit-scrollbar { display: none; }
+/* Centred when there is room, still scrollable from the start when there is not. */
+.annot-opts > :first-child { margin-left: auto; }
+.annot-opts > :last-child { margin-right: auto; }
+.annot-opts.off { opacity: 0.35; pointer-events: none; }
+
+.annot-swatches { display: flex; flex: none; }
+.annot-swatch {
+  flex: none;
+  width: 40px; height: 44px;
+  padding: 0; border: 0;
+  background: transparent;
+  display: inline-flex; align-items: center; justify-content: center;
+  touch-action: manipulation;
+}
+.annot-swatch span {
+  display: block;
+  width: 28px; height: 28px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px rgba(255, 255, 255, 0.4);
+  transition: transform 0.12s;
+}
+.annot-swatch.on span { transform: scale(1.1); box-shadow: 0 0 0 3px var(--an-bar), 0 0 0 5px #fff; }
+
+.annot-sizes {
+  flex: none;
+  display: flex; gap: 2px;
+  padding: 2px;
+  border-radius: 12px;
+  background: var(--an-bar-2);
+}
+.annot-size {
+  width: 36px; height: 44px;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  border: 0; border-radius: 10px;
+  background: transparent; color: var(--an-muted);
+  font-size: 11px; font-weight: 750;
+  touch-action: manipulation;
+}
+.annot-size.on { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.annot-dot { display: block; border-radius: 50%; background: currentColor; }
+.annot-dot-S { width: 5px; height: 5px; }
+.annot-dot-M { width: 9px; height: 9px; }
+.annot-dot-L { width: 14px; height: 14px; }
+
+/* ---- tools -------------------------------------------------------------------------- */
+
+.annot-tools {
+  flex: none;
+  position: relative; /* offsetParent for keeping the chosen tool in view */
+  display: flex; gap: 2px;
+  padding: 4px max(6px, var(--safe-right)) calc(6px + var(--safe-bottom)) max(6px, var(--safe-left));
+  background: var(--an-bar);
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  -webkit-overflow-scrolling: touch;
+}
+.annot-tools::-webkit-scrollbar { display: none; }
+.annot-tools > :first-child { margin-left: auto; }
+.annot-tools > :last-child { margin-right: auto; }
+.annot-tool {
+  flex: none;
+  scroll-snap-align: start;
+  width: 62px; min-height: 56px;
+  display: inline-flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  border: 0; border-radius: 12px;
+  background: transparent; color: var(--an-muted);
+  font-size: 11.5px; font-weight: 650;
+  touch-action: manipulation;
+  user-select: none; -webkit-user-select: none;
+}
+.annot-tool span { white-space: nowrap; }
+.annot-tool:active { background: rgba(255, 255, 255, 0.08); }
+.annot-tool.on { background: var(--brand); color: #fff; }
+
+@media (hover: hover) {
+  .annot-tool:hover { color: #fff; background: rgba(255, 255, 255, 0.07); }
+  .annot-tool.on:hover { background: var(--brand); }
+  .annot-swatch:hover span { transform: scale(1.08); }
+  .annot-size:hover { color: #fff; }
+  .annot-stage[data-cursor="erase"] { cursor: none; } /* the drawn ring is the cursor */
+}
+
+/* Very narrow phones: keep "Save" as a word, drop its icon. */
+@media (max-width: 360px) {
+  .annot-save .ic { display: none; }
+  .annot-save { padding: 0 12px; }
+}
+
+/* Phones held sideways: the photo needs the height more than the labels do. */
+@media (max-height: 520px) {
+  .annot-top { min-height: calc(48px + var(--safe-top)); }
+  .annot-tool { width: 50px; min-height: 46px; }
+  .annot-tool span { display: none; }
+  .annot-opts { padding-top: 2px; padding-bottom: 0; }
+  .annot-swatch, .annot-size { height: 40px; }
+}

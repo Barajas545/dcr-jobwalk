@@ -1,0 +1,42 @@
+<!doctype html>
+<!--
+  DCR Job Walk viewer: the template for the index.html inside every export.
+
+  js/core/package.js (buildViewerHtml) makes the exported page by putting
+  three things into this file, each in place of a marker:
+    VIEWER_CSS   inside the style element: the contents of viewer/viewer.css
+    VIEWER_JS    inside the last script element: the contents of viewer/viewer.js
+    VIEWER_DATA  inside the script element with id "jobwalk-data": the job walk
+                 as JSON, with every less-than sign escaped as \u003c so the
+                 data can never end that element (notes are user text)
+  A marker is an HTML comment holding just the name, e.g. the comment
+  "VIEWER_DATA". Each must appear exactly once below; package.js refuses the
+  template otherwise. (This note names them without the comment syntax on
+  purpose, so it is not mistaken for one.)
+
+  The page is self-contained: a classic script (no modules, no fetch), so
+  it works opened straight from the unzipped folder (file://) and from any
+  static web host. Photos, videos and voice notes are referenced by relative
+  path (media/...). The only outside requests are Leaflet (unpkg.com, with
+  SRI) and Esri satellite tiles, and only for levels that have no floor plan
+  and only when online.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<meta name="generator" content="DCR Job Walk">
+<title>DCR Job Walk</title>
+<style><!--VIEWER_CSS--></style>
+</head>
+<body>
+<noscript><div class="noscript">This job walk viewer needs JavaScript. Open index.html in Chrome, Edge, Safari or Firefox. The photos themselves are in the media folder next to it.</div></noscript>
+<div id="app" class="app"><div class="boot">Opening the job walk…</div></div>
+<div id="print-root" class="print-root"></div>
+<script type="application/json" id="jobwalk-data"><!--VIEWER_DATA--></script>
+<script><!--VIEWER_JS--></script>
+</body>
+</html>

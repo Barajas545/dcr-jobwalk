@@ -1,0 +1,18 @@
+{
+  "name": "dcr-job-walk",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DCR Job Walk: photos, videos and notes placed on a floor plan during a job walk. A static PWA; nothing here is built — tests and tools are for development only.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "dev": "node tools/serve.mjs 8795"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.7"
+  }
+}

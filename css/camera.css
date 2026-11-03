@@ -1,0 +1,561 @@
+/* camera.css — the camera screen (js/ui/camera-screen.js).
+ *
+ * A black, full-screen viewfinder with the controls floating over it, like
+ * the phone's own camera: everything readable in sun (white on dark, a text
+ * shadow on anything over the picture), every control at least 44 px, the
+ * shutter big and in reach of a thumb. Portrait puts the controls along the
+ * bottom; a phone turned sideways moves them to the right edge. Everything
+ * keeps clear of the notch and the home bar (safe-area insets).
+ * The camera is always dark, whatever the phone's theme; sheets and dialogs
+ * opened from it use the normal app colours.
+ */
+
+.screen.cam-screen { background: #000; color: #fff; }
+
+.cam {
+  --inset: 136px;
+  --cam-glass: rgba(0, 0, 0, 0.52);
+  --cam-line: rgba(255, 255, 255, 0.24);
+  --cam-top-h: 56px;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+  color: #fff;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+
+/* ---- the picture ---------------------------------------------------------------- */
+
+.cam-view { position: absolute; inset: 0; touch-action: none; }
+.cam-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: cover;
+  background: #000;
+}
+
+.cam-flash { position: absolute; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
+.cam-flash.on { animation: cam-flash 0.22s ease-out; }
+@keyframes cam-flash { 0% { opacity: 0.8; } 100% { opacity: 0; } }
+
+/* The horizon: a thin line where the real horizon is, green when the phone is level. */
+.cam-horizon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(72vw, 420px);
+  height: 0;
+  border-top: 2px solid rgba(255, 255, 255, 0.72);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.7));
+  pointer-events: none;
+  transition: border-color 0.15s;
+}
+.cam-horizon::before {
+  /* a gap in the middle, so the line never hides the subject */
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: -3px;
+  width: 22%;
+  height: 4px;
+  margin-left: -11%;
+  background: transparent;
+  border-left: 2px solid rgba(255, 255, 255, 0.72);
+  border-right: 2px solid rgba(255, 255, 255, 0.72);
+}
+.cam-horizon.level, .cam-horizon.level::before { border-color: #5fd38d; }
+
+.cam-zoomlabel {
+  position: absolute;
+  left: 50%;
+  top: 42%;
+  transform: translate(-50%, -50%);
+  padding: 6px 14px;
+  border-radius: 18px;
+  background: var(--cam-glass);
+  font-size: 20px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+/* ---- top: back, level, settings --------------------------------------------------- */
+
+.cam-top {
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: calc(var(--cam-top-h) + var(--safe-top));
+  padding: var(--safe-top) max(6px, var(--safe-right)) 0 max(6px, var(--safe-left));
+  background: linear-gradient(rgba(0, 0, 0, 0.62), rgba(0, 0, 0, 0));
+}
+.cam .icon-btn { color: #fff; }
+.cam .icon-btn:active { background: rgba(255, 255, 255, 0.16); }
+.cam-title { flex: 1 1 auto; min-width: 0; padding: 0 4px; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7); }
+.cam-title .t { font-size: 16px; font-weight: 750; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cam-title .s { font-size: 12px; opacity: 0.85; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cam.recording .cam-title { visibility: hidden; }
+.cam-demo {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 8px;
+  background: var(--warn);
+  color: #000;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+/* ---- position, heading, tilt -------------------------------------------------------- */
+
+.cam-hud {
+  position: absolute;
+  z-index: 3;
+  top: calc(var(--safe-top) + var(--cam-top-h));
+  left: max(10px, var(--safe-left));
+  right: calc(max(10px, var(--safe-right)) + var(--inset) + 10px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  pointer-events: none;
+}
+.cam-hud > * { pointer-events: auto; }
+.cam .pos-chip.cam-chip {
+  min-height: 34px;
+  background: var(--cam-glass);
+  color: #fff;
+  border-color: var(--cam-line);
+  box-shadow: none;
+  font-variant-numeric: tabular-nums;
+}
+.cam .pos-chip.cam-chip .dot { background: rgba(255, 255, 255, 0.5); }
+.cam .pos-chip.cam-chip.good .dot { background: #3ddc84; }
+.cam .pos-chip.cam-chip.fair .dot { background: #ffc94d; }
+.cam .pos-chip.cam-chip.poor .dot { background: #ff6b52; }
+.cam-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 17px;
+  border: 1px solid var(--cam-line);
+  background: var(--cam-glass);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+button.cam-pill { min-height: 44px; }
+.cam-compass-btn { background: var(--accent); border-color: var(--accent); }
+
+/* ---- REC ----------------------------------------------------------------------------- */
+
+.cam-rec {
+  position: absolute;
+  z-index: 4;
+  top: calc(var(--safe-top) + 10px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 18px;
+  background: var(--brand);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+.cam-rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #fff; animation: cam-blink 1s steps(2, start) infinite; }
+@keyframes cam-blink { to { visibility: hidden; } }
+
+/* ---- the plan / map inset -------------------------------------------------------------- */
+
+.cam-inset {
+  position: absolute;
+  z-index: 3;
+  top: calc(var(--safe-top) + var(--cam-top-h));
+  right: max(10px, var(--safe-right));
+  width: var(--inset);
+  height: var(--inset);
+  border-radius: 16px;
+  overflow: hidden;
+  background: #1b232c;
+  border: 2px solid rgba(255, 255, 255, 0.88);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+.cam-inset-view { position: absolute; inset: 0; display: flex; }
+.cam-inset-tap {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.cam-inset-tap:active { background: rgba(255, 255, 255, 0.14); }
+.cam-inset-tap:focus-visible { outline: 3px solid var(--accent); outline-offset: -3px; }
+.cam-inset-note {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 10px 4px 4px;
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.6));
+  color: #fff;
+  font-size: 11px;
+  font-weight: 750;
+  text-align: center;
+  pointer-events: none;
+}
+.cam-inset-fail {
+  margin: auto;
+  padding: 8px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---- light and zoom ---------------------------------------------------------------------- */
+
+.cam-side {
+  position: absolute;
+  z-index: 3;
+  left: max(10px, var(--safe-left));
+  top: calc(var(--safe-top) + var(--cam-top-h) + 92px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.cam .icon-btn.cam-tool {
+  width: 48px;
+  height: 48px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--cam-line);
+  background: var(--cam-glass);
+  color: #fff;
+}
+.cam .icon-btn.cam-tool.on { background: #ffd54a; border-color: #ffd54a; color: #000; }
+
+.cam-zoom {
+  position: absolute;
+  z-index: 3;
+  left: 50%;
+  bottom: calc(var(--safe-bottom) + 182px);
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 26px;
+  background: rgba(0, 0, 0, 0.36);
+}
+.cam-zoom-chip {
+  min-width: 44px;
+  height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  touch-action: manipulation;
+}
+.cam-zoom-chip.on { background: #fff; color: #000; }
+
+/* ---- bottom: mode, shutter, last capture -------------------------------------------------- */
+
+.cam-bottom {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 16px max(14px, var(--safe-right)) calc(14px + var(--safe-bottom)) max(14px, var(--safe-left));
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.66) 45%);
+}
+.seg.cam-modes { background: rgba(0, 0, 0, 0.45); }
+.cam-modes button { min-width: 78px; min-height: 40px; color: rgba(255, 255, 255, 0.82); }
+.cam-modes button.on { background: #fff; color: #000; }
+.cam-modes.locked { opacity: 0.45; }
+
+.cam-controls {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  width: 100%;
+  max-width: 480px;
+}
+.cam-thumb-wrap { justify-self: start; display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 72px; }
+.cam-end { justify-self: end; }
+
+.cam-shutter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 80px;
+  height: 80px;
+  padding: 0;
+  border: 5px solid #fff;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.12);
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.cam-shutter-core {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.08s, width 0.16s, height 0.16s, border-radius 0.16s, background 0.16s;
+}
+.cam-shutter:active .cam-shutter-core { transform: scale(0.86); }
+.cam-shutter.video .cam-shutter-core { background: var(--brand); }
+.cam-shutter.rec .cam-shutter-core { width: 30px; height: 30px; border-radius: 7px; }
+.cam-shutter.busy { opacity: 0.55; }
+.cam-shutter:disabled { opacity: 0.5; }
+.cam-shutter:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+
+.cam-thumb {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  padding: 0;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+.cam-thumb[data-state="empty"] { opacity: 0.45; }
+.cam-thumb[data-state="failed"] {
+  border-color: #ff5a3c;
+  box-shadow: 0 0 0 3px rgba(255, 90, 60, 0.45);
+  animation: cam-alert 1.2s ease-in-out infinite;
+}
+@keyframes cam-alert { 50% { box-shadow: 0 0 0 7px rgba(255, 90, 60, 0.2); } }
+.cam-thumb-img { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.cam-thumb-img img, .cam-thumb-img canvas, .cam-failed-prev canvas {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: cover;
+}
+.cam-thumb-status { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
+.cam-thumb[data-state="saving"] .cam-thumb-status { background: rgba(0, 0, 0, 0.38); }
+.cam-thumb-status .spinner { width: 24px; height: 24px; border-width: 3px; border-color: rgba(255, 255, 255, 0.35); border-top-color: #fff; }
+.cam-badge-ok, .cam-badge-err {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  color: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.cam-badge-ok { background: var(--ok); }
+.cam-badge-err { background: #e0391c; }
+.cam-thumb-count {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.68);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+.cam-thumb-cap {
+  min-height: 15px;
+  max-width: 128px;
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+  text-shadow: 0 1px 2px #000;
+}
+.cam-thumb-cap[data-state="failed"] { color: #ff9a85; }
+.cam-prev-empty { color: rgba(255, 255, 255, 0.7); }
+
+.cam-phone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  min-width: 72px;
+  min-height: 58px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-shadow: 0 1px 2px #000;
+}
+.cam-phone:active { background: rgba(255, 255, 255, 0.14); }
+
+/* ---- messages (starting, blocked, paused) ---------------------------------------------------- */
+
+.cam-msg {
+  position: absolute;
+  z-index: 2; /* under the top and bottom bars, so Back always works */
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + var(--cam-top-h) + 12px) max(20px, var(--safe-right)) calc(var(--safe-bottom) + 190px) max(20px, var(--safe-left));
+  background: rgba(0, 0, 0, 0.5);
+}
+.cam[data-cam="starting"] .cam-msg { background: transparent; }
+.cam-msg-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  max-width: 420px;
+  max-height: 100%;
+  overflow-y: auto;
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: rgba(23, 29, 37, 0.94);
+  text-align: center;
+  user-select: text;
+  -webkit-user-select: text;
+}
+.cam[data-cam="starting"] .cam-msg-box { background: rgba(0, 0, 0, 0.45); border-color: transparent; padding: 16px 20px; }
+.cam-msg-ic { color: #ffc94d; }
+.cam-msg-box h2 { font-size: 19px; font-weight: 750; }
+.cam-msg-box p { margin: 0; color: rgba(255, 255, 255, 0.84); font-size: 15px; }
+.cam-msg-box .spinner { border-color: rgba(255, 255, 255, 0.25); border-top-color: #fff; }
+.cam-msg-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 6px; }
+.cam-msg-btns .btn:not(.btn-primary) { background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.22); color: #fff; }
+
+/* ---- pin check: the full-screen plan with the cross ------------------------------------------ */
+
+.cam-pin {
+  position: absolute;
+  z-index: 10;
+  inset: 0;
+  display: flex;
+  background: var(--bg);
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+}
+.cam-pin-view { position: absolute; inset: 0; display: flex; }
+
+/* ---- sheets opened from the camera (normal app colours) --------------------------------------- */
+
+.cam-sheet .choose-opt.cam-opt-on { color: var(--accent); }
+.cam-sheet .choose-opt.cam-opt-on .choose-ic { background: var(--accent-tint); color: var(--accent); }
+.cam-rec-badge { margin-left: 6px; vertical-align: 1px; }
+.cam-switch { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.cam-switch-label { display: block; font-weight: 650; }
+.cam-switch-detail { display: block; font-size: 13px; color: var(--text-muted); }
+.cam-diag { margin-top: 14px; }
+
+.cam-failed-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.cam-failed-prev {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-3);
+  color: var(--text-muted);
+}
+.cam-failed-row .t { font-weight: 650; }
+.cam-failed-row .s { font-size: 13px; color: var(--danger); }
+.cam-failed-btns { display: flex; flex-direction: column; gap: 6px; }
+
+/* ---- a phone held sideways: controls along the right edge ------------------------------------- */
+
+@media (orientation: landscape) and (max-height: 560px) {
+  .cam { --inset: 118px; --cam-top-h: 50px; }
+  .cam-top { right: calc(var(--safe-right) + 128px); }
+  .cam-hud { right: calc(var(--safe-right) + 140px); }
+  .cam-inset { top: auto; right: auto; left: max(10px, var(--safe-left)); bottom: calc(10px + var(--safe-bottom)); }
+  .cam-side {
+    top: auto;
+    bottom: calc(10px + var(--safe-bottom));
+    left: calc(max(10px, var(--safe-left)) + var(--inset) + 12px);
+    flex-direction: row;
+  }
+  .cam-zoom {
+    left: auto;
+    right: calc(var(--safe-right) + 138px);
+    top: 50%;
+    bottom: auto;
+    transform: translateY(-50%);
+    flex-direction: column;
+  }
+  .cam-bottom {
+    top: 0;
+    left: auto;
+    width: calc(var(--safe-right) + 128px);
+    flex-direction: column-reverse;
+    justify-content: center;
+    gap: 10px;
+    padding: calc(var(--safe-top) + 8px) max(8px, var(--safe-right)) calc(8px + var(--safe-bottom)) 8px;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.62) 40%);
+  }
+  .cam-modes button { min-width: 54px; padding: 7px 8px; font-size: 13px; }
+  .cam-controls { display: flex; flex-direction: column-reverse; align-items: center; gap: 14px; width: auto; }
+  .cam-thumb-wrap, .cam-end { justify-self: auto; }
+  .cam-phone { min-height: 48px; }
+  .cam-rec { left: calc(50% - 64px - var(--safe-right) / 2); }
+  .cam-msg { padding: calc(var(--safe-top) + var(--cam-top-h)) calc(var(--safe-right) + 140px) calc(var(--safe-bottom) + 12px) max(20px, var(--safe-left)); }
+}
+
+/* Small phones (iPhone SE): a little tighter. */
+@media (max-width: 360px) and (orientation: portrait) {
+  .cam { --inset: 112px; }
+  .cam-shutter { width: 72px; height: 72px; }
+  .cam-shutter-core { width: 54px; height: 54px; }
+  .cam-zoom { bottom: calc(var(--safe-bottom) + 174px); }
+}

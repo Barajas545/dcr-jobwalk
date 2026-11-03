@@ -1,0 +1,255 @@
+/* views.css — the plan view, the map view, and the precise "place the point" mode.
+ *
+ * Both views fill the element they are created in (give it a size: a flex
+ * child with flex: 1, or position: absolute; inset: 0). They take every touch
+ * themselves (touch-action: none), so the page never scrolls or zooms under a
+ * pinch. The placement mode's banner and buttons sit on top of the view, use
+ * the shared .btn styles, and keep clear of the notch and the home bar when
+ * the view reaches the screen's edges (.pv-at-top / .pv-at-bottom are set by
+ * the view itself).
+ */
+
+/* ---- plan view ---------------------------------------------------------------- */
+
+.pv, .mv {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface-3);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  outline: none;
+}
+.pv { cursor: grab; }
+.pv:active { cursor: grabbing; }
+.pv.pv-hot { cursor: pointer; }
+.pv.pv-picking { cursor: move; }
+.pv:focus-visible { box-shadow: inset 0 0 0 3px var(--accent); }
+.pv-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+  max-width: none;
+  pointer-events: none;
+}
+
+/* The camera's live mini-map: no gestures; taps go to whatever holds it. */
+.pv.pv-static, .mv.mv-static { pointer-events: none; cursor: default; }
+.mv.mv-static .leaflet-control-attribution { font-size: 8.5px; line-height: 1.3; padding: 0 3px; }
+
+/* ---- map view --------------------------------------------------------------------- */
+
+/* isolation: the plan overlay's "multiply" blends with the map, nothing else. */
+.mv { isolation: isolate; }
+.mv-map {
+  position: absolute;
+  inset: 0;
+  background: var(--surface-3);
+}
+.mv .leaflet-container {
+  background: var(--surface-3);
+  font: 12px/1.4 var(--font);
+  outline: none;
+}
+.mv .leaflet-container:focus-visible { box-shadow: inset 0 0 0 3px var(--accent); }
+.mv-map.mv-hot { cursor: pointer; }
+.mv.mv-picking .mv-map { cursor: move; }
+
+.mv-plan, .mv-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: none;
+  pointer-events: none;
+}
+/* Above the tiles (map pane: 400), below Leaflet's controls (800–1000). */
+.mv-plan { z-index: 440; mix-blend-mode: multiply; }
+.mv-plan.mv-plan-normal { mix-blend-mode: normal; }
+.mv-overlay { z-index: 450; }
+
+.mv .leaflet-control-attribution {
+  max-width: calc(var(--mv-w, 100vw) * 0.72);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10.5px;
+  color: #3a4550;
+  background: rgba(255, 255, 255, 0.82);
+  margin-right: max(0px, var(--safe-right)) !important;
+}
+.mv .leaflet-control-attribution a { color: inherit; }
+.mv .leaflet-control-scale { margin-left: max(10px, var(--safe-left)); }
+
+/* Google's mark (text form, which their policy allows when space is tight):
+   16–19 px tall, clear space around it, nothing on top of it. */
+.mv-glogo {
+  position: absolute;
+  left: max(10px, var(--safe-left));
+  bottom: 6px;
+  z-index: 820;
+  padding: 0 2px;
+  font: 600 15px/18px Roboto, "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: 0.01em;
+  color: #fff;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.85), 0 1px 3px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+.mv.pv-at-bottom .mv-glogo { bottom: calc(6px + var(--safe-bottom)); }
+/* The copyright never runs into the Google mark (their policy: keep clear space). */
+.mv.mv-google .leaflet-control-attribution { max-width: calc(var(--mv-w, 100vw) - 140px); }
+.mv.pv-at-bottom .leaflet-bottom { bottom: var(--safe-bottom); }
+
+.mv-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  background: var(--surface-3);
+}
+.mv-fail {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  text-align: center;
+  background: var(--surface-3);
+  color: var(--text);
+}
+.mv-fail h2 { font-size: 18px; margin-bottom: 4px; }
+.mv-fail p { max-width: 420px; margin: 0; }
+
+/* "No signal" note: top centre, out of the way of the screen's own buttons. */
+.mv-status {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  z-index: 900;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-align: center;
+  pointer-events: none;
+}
+
+.mv-layers {
+  position: absolute;
+  right: max(10px, var(--safe-right));
+  top: 10px;
+  z-index: 900;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+.mv-layers:active { background: var(--surface-2); }
+
+/* ---- precise placement (both views) ------------------------------------------------- */
+
+.vw-pick {
+  position: absolute;
+  inset: 0;
+  z-index: 1100;            /* above Leaflet's controls */
+  pointer-events: none;     /* the plan or map underneath keeps every gesture */
+}
+
+.vw-pick-banner {
+  position: absolute;
+  top: 12px;
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+.vw-pick-title { font-size: 16.5px; font-weight: 750; line-height: 1.25; }
+.vw-pick-hint { margin-top: 2px; font-size: 14px; color: var(--text-muted); line-height: 1.35; }
+.pv-at-top .vw-pick-banner { top: calc(12px + var(--safe-top)); }
+
+.vw-cross {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 72px;
+  height: 72px;
+  margin: -36px 0 0 -36px;
+  filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.35));
+}
+.vw-cross svg { display: block; }
+
+.vw-loupe {
+  position: absolute;
+  display: block;
+  max-width: none;
+  border-radius: 50%;
+  border: 3px solid #fff;
+  background: var(--surface-3);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.28), var(--shadow-lg);
+}
+
+.vw-pick-btns {
+  position: absolute;
+  bottom: 12px;
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+}
+.pv-at-bottom .vw-pick-btns { bottom: calc(12px + var(--safe-bottom)); }
+.vw-pick-btns .btn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 58px;
+  font-size: 17.5px;
+  box-shadow: var(--shadow);
+}
+.vw-pick-cancel { background: var(--surface); color: var(--text); }
+.vw-pick-set .ic { flex: none; }
+
+/* A short landscape phone: smaller banner, buttons side by side at the bottom corners. */
+@media (max-height: 460px) {
+  .vw-pick-banner { padding: 6px 12px; }
+  .vw-pick-hint { display: none; }
+  .vw-pick-btns .btn { min-height: 50px; }
+}
+
+/* Dark: the map's attribution and the placement chrome follow the theme;
+   the cross, the loupe ring and the markers stay high-contrast on purpose. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .mv .leaflet-control-attribution { color: #cfd6dd; background: rgba(23, 29, 37, 0.8); }
+}
+:root[data-theme="dark"] .mv .leaflet-control-attribution { color: #cfd6dd; background: rgba(23, 29, 37, 0.8); }

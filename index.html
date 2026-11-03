@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<!-- Only this site's own files run here. Map tiles and the address search
+     are the only outside requests; photos and notes never leave the phone
+     except in a file the person exports. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://server.arcgisonline.com https://services.arcgisonline.com https://ibasemaps-api.arcgis.com https://*.tile.openstreetmap.org https://tile.googleapis.com; media-src 'self' blob:; connect-src 'self' blob: data: https://nominatim.openstreetmap.org https://tile.googleapis.com https://server.arcgisonline.com https://services.arcgisonline.com https://ibasemaps-api.arcgis.com https://*.tile.openstreetmap.org; worker-src 'self' blob:; font-src 'self' data:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>DCR Job Walk</title>
+<meta name="description" content="Photos, videos and notes placed on the floor plan during a job walk — DCR Framing.">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#c8371f">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Job Walk">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+<link rel="stylesheet" href="css/screens.css">
+<link rel="stylesheet" href="css/views.css">
+<link rel="stylesheet" href="css/calibrate.css">
+<link rel="stylesheet" href="css/camera.css">
+<link rel="stylesheet" href="css/annotate.css">
+<link rel="stylesheet" href="css/item.css">
+<link rel="stylesheet" href="css/export.css">
+<script type="module" src="js/main.js"></script>
+</head>
+<body>
+<div id="screens"><div class="screen"><div class="empty" style="margin:auto">Opening DCR Job Walk…</div></div></div>
+<div id="overlays"></div>
+<noscript><p style="padding:24px">DCR Job Walk needs JavaScript. Open it in Safari (iPhone) or Chrome (Android).</p></noscript>
+</body>
+</html>
