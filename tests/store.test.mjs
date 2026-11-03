@@ -339,3 +339,11 @@ test('recording chunk seqs are listed in order', async () => {
   assert.equal(chunks[2].seq, 2);
   await store.endRecording(rec.recId);
 });
+
+test('pieces of a video with no recording row are removed later, not right away', async () => {
+  const db = await import('../js/core/db.js');
+  await db.put('chunks', { recId: 'r_stray', seq: 0, data: new ArrayBuffer(4), size: 4, type: 'video/mp4', at: Date.now() });
+  assert.equal((await store.recoverOrphans()).chunksRemoved, 0);
+  assert.equal((await store.recoverOrphans({ now: Date.now() + 11 * 60 * 1000 })).chunksRemoved, 1);
+  assert.equal((await db.getAllKeys('chunks', db.rangeFor('r_stray'))).length, 0);
+});

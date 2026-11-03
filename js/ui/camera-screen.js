@@ -1084,6 +1084,16 @@ export async function open(ctx) {
   // saved, or failed and not downloaded yet (a failed one is never dropped).
   const heldPhotos = () => jobs.filter((j) => j.kind === 'photo' && (j.state === 'capturing' || j.state === 'saving' || (j.state === 'failed' && !j.downloaded))).length;
   const failedJobs = () => jobs.filter((j) => j.state === 'failed');
+  // Captures that exist only in this page: still being taken or saved, a
+  // recording, or a failed save not downloaded yet. main.js holds an update
+  // reload (and the browser asks before closing the tab) while this is above
+  // 0 — even after this screen has closed and its saves carry on.
+  const unsafeCount = () => jobs.filter((j) => j.state === 'capturing' || j.state === 'saving' || j.state === 'recording' || (j.state === 'failed' && !j.downloaded)).length;
+  const stopTracking = app.trackUnsaved?.(() => {
+    const n = unsafeCount();
+    if (!n && closed) stopTracking?.();
+    return n;
+  });
   const unsavedJobs = () => failedJobs().filter((j) => !j.downloaded);
   const blockedFull = () => phoneFull && unsavedJobs().length > 0;
 
@@ -1163,7 +1173,7 @@ export async function open(ctx) {
     const base = err?.message || `The ${what} was not saved.`;
     if (closed) {
       // The screen is gone; the toast is the only way left to keep it.
-      toast(`${base} Download it now so it is not lost.`, { type: 'err', action: job.blob ? { label: 'Download', onclick: () => downloadJob(job) } : undefined });
+      toast(`${base} Download it now so it is not lost.`, { type: 'err', sticky: true, action: job.blob ? { label: 'Download', onclick: () => downloadJob(job) } : undefined });
       return;
     }
     toast(`${base} Tap the red thumbnail to try again or to download it.`, { type: 'err', action: job.blob ? { label: 'Download', onclick: () => downloadJob(job) } : undefined });
@@ -1636,7 +1646,7 @@ export async function open(ctx) {
     try {
       r = await saveBlob(job.blob, name, { title: name });
     } catch (err) {
-      toast(`The download did not start: ${err?.message || err}${closed ? ` Download the ${what} now so it is not lost.` : ''}`, { type: 'err', action: again });
+      toast(`The download did not start: ${err?.message || err}${closed ? ` Download the ${what} now so it is not lost.` : ''}`, { type: 'err', sticky: closed, action: again });
       return false;
     }
     if (r === 'saved' || r === 'shared' || r === 'downloaded') {
@@ -1649,7 +1659,7 @@ export async function open(ctx) {
       toast(`The phone wants one more tap to keep this ${what}: tap ${again.label}.`, { type: closed ? 'err' : 'warn', ms: 0, action: again });
     } else if (closed) {
       // Cancelled after the screen was left: this toast is the only way left to keep it.
-      toast(`The ${what} is still not saved. Download it now so it is not lost.`, { type: 'err', action: again });
+      toast(`The ${what} is still not saved. Download it now so it is not lost.`, { type: 'err', sticky: true, action: again });
     }
     return false;
   }
@@ -1846,6 +1856,13 @@ export async function open(ctx) {
 
   function onPhoneCamera() {
     if (recorder) { toast('Stop the video first.', { type: 'warn', ms: 2000 }); return; }
+    // The phone is full and photos are waiting in memory: a new one would
+    // only join them there.
+    if (blockedFull()) {
+      if (camState === 'live') showFullPanel();
+      else toast('The phone is full: save the photos not saved yet (the red thumbnail) before taking more.', { type: 'warn', ms: 6000 });
+      return;
+    }
     const sh = openSheet({ title: 'Use the phone\'s camera' });
     sh.body.append(
       el('p', {}, 'Your phone\'s own camera app takes the photo. DCR Job Walk saves where you stand and which way you face from this phone — when you tap Open camera, and again when the photo comes back.'),

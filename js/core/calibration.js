@@ -491,8 +491,9 @@ export function reprojectItems(items, level, origin, { previous = null, toEnu = 
     // by hand, so a pin pinned before calibrating would otherwise never get a
     // wedge, and a recalibration would leave its wedge at the old rotation.
     // (A lock with no plan point has nothing on the plan to update.)
-    const locked = !!pose && pose.planLocked === true;
-    if (locked && !validPt(pose.plan)) continue;
+    // A lock with no plan point (an older map pin placed by hand) has nothing
+    // on the plan to keep, so it is placed from its ground position instead.
+    const locked = !!pose && pose.planLocked === true && validPt(pose.plan);
     const enu = pose && !locked ? poseEnu(pose, origin, toEnu) : null;
     const tr = Array.isArray(item.track) ? reprojectTrack(item.track, cal, origin, toEnu, { keepXY: locked }) : { track: item.track ?? null, changed: false };
     if (!enu && !locked && !tr.changed) continue;

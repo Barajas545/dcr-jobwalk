@@ -74,8 +74,9 @@ function overlays() {
  * A short message at the bottom of the screen.
  * type: 'info' | 'ok' | 'err' | 'warn'. Errors stay until tapped.
  * action: {label, onclick} adds a button (e.g. Undo).
+ * sticky: with an action, only the button closes it (no tap-to-dismiss).
  */
-export function toast(message, { type = 'info', ms, action } = {}) {
+export function toast(message, { type = 'info', ms, action, sticky = false } = {}) {
   let host = document.getElementById('toasts');
   if (!host) { host = el('div', { id: 'toasts', 'aria-live': 'polite' }); overlays().append(host); }
   const ic = { ok: 'check', err: 'warning', warn: 'warning', info: 'info' }[type] || 'info';
@@ -86,7 +87,10 @@ export function toast(message, { type = 'info', ms, action } = {}) {
   if (action) {
     t.append(el('button', { type: 'button', class: 'toast-act', onclick: (e) => { e.stopPropagation(); close(); action.onclick?.(); } }, action.label));
   }
-  t.addEventListener('click', close);
+  // A sticky toast closes only through its button: it may be the last way to
+  // reach an unsaved photo, so a stray tap on its text must not dismiss it.
+  if (sticky && action) t.classList.add('toast-sticky');
+  else t.addEventListener('click', close);
   host.append(t);
   const life = ms ?? (type === 'err' ? 0 : type === 'warn' ? 6000 : 2600);
   if (life) setTimeout(close, life);

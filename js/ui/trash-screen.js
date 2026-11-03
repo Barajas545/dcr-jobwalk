@@ -246,9 +246,13 @@ export async function open(ctx) {
 
   async function eraseProject(p, contents) {
     if (working) return;
+    // A video still being rebuilt from its pieces belongs to the job walk too.
+    let unfinished = 0;
+    try { unfinished = (await store.listRecordings()).filter((r) => r.projectId === p.id).length; } catch { /* none known */ }
     const ok = await confirmDialog({
       title: `Erase "${p.name}" forever?`,
-      message: describeProjectLoss(p, contents, { device: deviceWord() }),
+      message: describeProjectLoss(p, contents, { device: deviceWord() })
+        + (unfinished ? ` That includes ${unfinished === 1 ? 'a video' : `${unfinished} videos`} still being saved from ${unfinished === 1 ? 'its' : 'their'} pieces.` : ''),
       okText: 'Erase forever',
       danger: true,
     });

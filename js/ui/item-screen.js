@@ -2112,7 +2112,7 @@ export async function open(ctx) {
     }
     return store.updateItem(iid, (cur) => {
       const pose = cur.pose ? { ...cur.pose } : {
-        t: cur.createdAt, geo: null, enu: null, plan: null, planAcc: null, planLocked: true, heading: null, headingAcc: null,
+        t: cur.createdAt, geo: null, enu: null, plan: null, planAcc: null, planLocked: false, heading: null, headingAcc: null,
         planHeading: null, pitch: null, roll: null, facing: 'camera', source: 'manual', quality: 'none',
       };
       if (kind === 'plan') {
@@ -2124,7 +2124,10 @@ export async function open(ctx) {
           try { pose.enu = toEnu(project.origin, pt.lat, pt.lng); } catch { /* keep the old one */ }
         }
       }
-      pose.planLocked = true;
+      // Only a spot placed on the PLAN is locked there. A spot placed on the
+      // map is a ground position: a plan calibrated later places it, like GPS.
+      if (kind === 'plan') pose.planLocked = true;
+      pose.pinnedAt = Date.now();
       cur.pose = pose;
     });
   }
@@ -2245,8 +2248,11 @@ export async function open(ctx) {
     }
     const name = fileNameFor(item, { levelName: level?.name, variant: useMarked ? 'annotated' : 'original', mimeType: blob.type });
     try {
-      const how = await saveBlob(blob, name, { preferShare: true, title: name });
+      // share: true opens the share sheet on Android too (photos and videos
+      // are types Chrome shares); 'needs-tap' means nothing was shared.
+      const how = await saveBlob(blob, name, { share: true, title: name });
       if (how === 'downloaded') toast(`Downloaded ${name}`, { type: 'ok' });
+      else if (how === 'needs-tap') toast('The phone wants another tap: tap Share again.', { type: 'warn' });
     } catch (err) {
       toast(`It could not be shared: ${err.message}`, { type: 'err' });
     }

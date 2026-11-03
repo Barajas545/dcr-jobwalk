@@ -840,6 +840,22 @@ export async function recoverOrphans({ now = Date.now() } = {}) {
     out.partsRemoved++;
   }
 
+  // Pieces of a video with no recording row: an import killed between
+  // writing a recording's pieces and its row (the row is written last). The
+  // .zip still has them; on the phone nothing can rebuild them.
+  out.chunksRemoved = 0;
+  if (!importing) {
+    const recIds = new Set((await db.getAll('recordings')).map((r) => r.recId));
+    const firstKey = new Map();
+    for (const k of await db.getAllKeys('chunks')) if (!recIds.has(k[0]) && !firstKey.has(k[0])) firstKey.set(k[0], k);
+    for (const [recId, key] of firstKey) {
+      const first = await db.get('chunks', key); // one piece, to read when it was written
+      if (first && now - (first.at || 0) < RECOVER_AFTER_MS) continue;
+      await db.run(['chunks'], 'readwrite', (tx) => { tx.objectStore('chunks').delete(db.rangeFor(recId)); });
+      out.chunksRemoved++;
+    }
+  }
+
   const items = await db.getAll('items');
   const referenced = new Set();
   const itemIds = new Set(items.map((i) => i.id));

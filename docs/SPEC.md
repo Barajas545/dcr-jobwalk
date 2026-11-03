@@ -221,6 +221,16 @@ x right, y down, in that image's pixels.
 }
 ```
 
+Fields added during the build (keep them through export/import):
+`pose.raw`, `pose.fix` (the raw GPS fix), `pose.pinnedAt` (placed by hand),
+`pose.gpsGeo` (the GPS spot kept when a map pin is moved by hand),
+`pose.planPrev` (`{mediaId, x, y, planLocked}`: the point on a plan image that
+was replaced — kept, not drawn), `planAuto/geoAuto/enuAuto` (measured values
+before a pin check), item `captureInfo`, `poseAtOpen`, `annotationsDraft`,
+`annotationHistory`, `removedVoiceNotes`. Only a spot placed on the PLAN is
+`planLocked`; a spot placed on the map is a ground position that a later
+calibration places on the plan.
+
 **TrackPoint** (video): `{t /* ms since video start */, e, n, x, y, lat, lng, acc, heading, planHeading, pitch}` —
 any field may be null; sampled at 4–5 Hz.
 
@@ -620,8 +630,17 @@ media/annotated/<seq>-<itemId>.jpg       markup burned in (and the export stamp 
 media/thumbs/<itemId>.jpg
 media/videos/<seq>-<itemId>.<webm|mp4>
 media/voice/<voiceId>.<webm|m4a|ogg>
+media/recordings/<recId>/<seq>.<ext>   pieces of a video that was not finished saving (rebuilt after import)
 README.txt                 how to open, view and import
 ```
+
+`jobwalk.json` also lists `recordings` (rows + chunk lists), `damaged`
+(files whose bytes did not match their size on export) and the media index.
+An import leaves out a damaged or missing file instead of failing (the
+project's `importedFrom.damagedFiles` / `missingFiles` count them, and the
+copy does not start as backed up); an encrypted or unsupported zip stops
+it. Import holds the Web Lock `jw-import` (`store.withImportLock`) so the
+start-up cleanup in another window never removes files it is writing.
 
 The viewer (`viewer/viewer.html` template + `viewer.css` + `viewer.js`,
 classic script, **no modules, no fetch**) works opened straight from the
@@ -674,6 +693,13 @@ screen but uses `inspectPackage` / `importPackage`.
   the item if the app dies between the two writes.
 - `estimate().quota` is not free space (Chrome reports usage + 10 GiB):
   show usage only; treat QuotaExceededError as the real signal.
+- Only `'saved'` and `'shared'` from `shell.saveBlob` prove a file exists;
+  `'downloaded'` only started one (the export asks "Did it download?" before
+  marking a backup); `'needs-tap'` saved nothing. `{share: true}` opens the
+  share sheet on Android for photo/video/text types.
+- Captures that live only in memory register with `app.trackUnsaved(() => n)`;
+  updates wait and the browser asks before the tab closes while n > 0. A
+  toast that is the last way to reach an unsaved photo is `sticky`.
 - Saving a file the person keeps (`shell.saveBlob`) needs a fresh tap:
   build the zip first, then show a **Save** button; handle `'needs-tap'`.
   Android uses the Save-as picker (the share sheet refuses .zip there);

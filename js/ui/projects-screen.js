@@ -461,8 +461,19 @@ export async function open(ctx) {
       return;
     }
     b2.done();
-    toast(`Imported "${name}".`, { type: 'ok' });
     const pid = typeof id === 'string' ? id : id?.id || id?.projectId;
+    // Damaged or missing files are left out rather than stopping the import;
+    // say so plainly, and keep the message up until it is read.
+    let left = 0;
+    try {
+      const imported = pid ? await store.getProject(pid) : null;
+      left = (imported?.importedFrom?.damagedFiles || 0) + (imported?.importedFrom?.missingFiles || 0);
+    } catch { /* the import itself succeeded */ }
+    if (left) {
+      toast(`Imported "${name}", but ${left} file${left === 1 ? ' was' : 's were'} damaged or missing in the .zip and left out.${mode === 'replace' ? ' The copy that was on this phone is in Recently Deleted.' : ''}`, { type: 'warn', ms: 0 });
+    } else {
+      toast(`Imported "${name}".`, { type: 'ok' });
+    }
     if (pid && !closed && ctx.isCurrent()) ctx.navigate(`p/${pid}`);
   }
 
@@ -477,7 +488,7 @@ export async function open(ctx) {
     const what = countsText(info?.counts || {});
     const extra = [];
     if (info?.counts?.deleted) extra.push(`(plus ${info.counts.deleted} in its Recently Deleted)`);
-    if (info?.complete === false) extra.push(`Warning: ${info.missingFiles?.length || 'some'} file(s) listed in it are missing from the .zip; the rest can still be imported.`);
+    if (info?.complete === false && info.missingFiles > 0) extra.push(`Warning: ${info.missingFiles} file${info.missingFiles === 1 ? '' : 's'} listed in it ${info.missingFiles === 1 ? 'is' : 'are'} missing from the .zip; the rest can still be imported.`);
     const lines = [what, ...extra, p.address, p.walkDate ? `Walk date ${formatDate(p.walkDate)}` : null].filter(Boolean).join('\n');
     if (!info?.exists) {
       const ok = await confirmDialog({ title: `Import "${p.name || 'job walk'}"?`, message: `${lines}\n\nIt will be added to this device.`, okText: 'Import' });

@@ -49,7 +49,41 @@ const app = {
   cache,
   enterProject,
   currentProjectId: null,
+  trackUnsaved,
+  unsavedCount,
 };
+
+// ---- work that is not saved yet -------------------------------------------------------
+//
+// The camera keeps saving photos after its screen closes, and keeps any
+// photo whose save failed in memory until it is downloaded. Those live only
+// in this page, so an update reload or closing the tab would lose them. A
+// screen registers a counter here (trackUnsaved(() => n)); the update
+// reload waits while it is above 0, and the browser asks before the tab
+// closes.
+
+const unsavedSources = new Set();
+
+/** Register a function that says how many captures are not safe yet; returns the function that unregisters it. */
+function trackUnsaved(count) {
+  unsavedSources.add(count);
+  return () => unsavedSources.delete(count);
+}
+
+function unsavedCount() {
+  let n = 0;
+  for (const count of [...unsavedSources]) {
+    try { n += Number(count()) || 0; } catch { /* a screen that is gone */ }
+  }
+  return n;
+}
+
+window.addEventListener('beforeunload', (e) => {
+  if (unsavedCount() > 0) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 
 // ---- the open project ---------------------------------------------------------------
 //
@@ -277,6 +311,14 @@ let reloadOnTakeover = false;   // this page asked the new version to take over:
 
 /** Reload once the current screen allows leaving it (`reload` defaults to location.reload). */
 function reloadWhenAllowed(reload = () => location.reload()) {
+  const n = unsavedCount();
+  if (n > 0) {
+    shell.alertDialog({
+      title: 'Photos are still being saved',
+      message: `${n} photo${n === 1 ? ' or video is' : 's or videos are'} not saved on the phone yet. Wait a moment, or download any that failed (the red thumbnail on the camera), then update.`,
+    });
+    return;
+  }
   if (current?.guard) askGuard(() => reload());
   else reload();
 }
