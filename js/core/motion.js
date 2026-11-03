@@ -201,7 +201,7 @@ export function processSample(st, sample) {
  *   'status' 'off'|'ok'|'needs-permission'|'denied'|'unavailable'
  * getState(now) → the current motion, or 'unknown' when no sample came in
  * the last 2 s (page hidden, sensor stopped) — then nobody knows whether the
- * person walked.
+ * person walked. `now` is on the clock passed as `now` (Date.now() by default).
  * getStepLength() is read for every step (settings can change any time).
  */
 export function createMotionSource({ win = globalThis, now = () => Date.now(), timers = globalThis, getStepLength = () => STEP_DEFAULTS.stepLength, weinberg = true, watchdogMs = 4000 } = {}) {
@@ -233,7 +233,13 @@ export function createMotionSource({ win = globalThis, now = () => Date.now(), t
     const a = e.accelerationIncludingGravity;
     if (!a || a.x == null || a.y == null || a.z == null) return;
     const t = eventTime(e, win, now);
-    lastSampleAt = t;
+    // When the sample ARRIVED, on the caller's clock (getState compares it with
+    // the caller's now()). The event's own time is on the phone's monotonic
+    // clock, which stops while the phone sleeps: after a lock it runs minutes
+    // behind Date.now(), and every reading would look 2 s old — 'unknown' for
+    // the rest of the walk. It is still the right clock for the detector's
+    // spacing between samples (t below).
+    lastSampleAt = now();
     if (!gotData) {
       gotData = true;
       if (perm === 'prompt' || perm === 'unknown') perm = 'granted';

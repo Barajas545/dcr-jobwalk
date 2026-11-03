@@ -176,6 +176,19 @@ function captureError(message, cause, extra = {}) {
   return e;
 }
 
+/**
+ * Whether a save failed because the phone is out of storage space
+ * (QuotaExceededError, also when wrapped: savePhoto's error carries the
+ * storage error as `cause`). The camera stops taking photos then — each new
+ * one could only live in memory (docs/RESEARCH.md storage).
+ */
+export function isStorageFull(err) {
+  for (let e = err, depth = 0; e && typeof e === 'object' && depth < 4; e = e.cause, depth++) {
+    if (e.name === 'QuotaExceededError') return true;
+  }
+  return false;
+}
+
 function nameFor(prefix, t) {
   const d = new Date(t || Date.now());
   const p = (n) => String(n).padStart(2, '0');

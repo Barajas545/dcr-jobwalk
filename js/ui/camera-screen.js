@@ -35,7 +35,7 @@ import { el, iconButton, toast, confirmDialog, choose, openSheet, busy, pickFile
 import { icon } from './icons.js';
 import { formatAccuracy, formatDuration, formatTime, compassPoint, normDeg, clamp, uid, isIOS, safeFileName, buzz, debounce } from '../core/util.js';
 import * as media from '../core/media.js';
-import { snapshotPose, savePhoto, uprightCorrection, holdAngle, emptyPose } from '../core/capture.js';
+import { snapshotPose, savePhoto, uprightCorrection, holdAngle, emptyPose, isStorageFull } from '../core/capture.js';
 import { createVideoRecorder, VIDEO_SIZES } from '../core/recorder.js';
 
 const PHOTO_SIZE = { width: 4032, height: 3024 };   // landscape numbers (WebKit bug 323550)
@@ -240,6 +240,7 @@ export async function open(ctx) {
   ctx.root.append(camEl);
 
   function showPanel({ ic = 'camera', title = '', text = '', buttons = [], spinner = false } = {}) {
+    fullPanelOpen = false;
     msg.replaceChildren(el('div', { class: 'cam-msg-box' },
       spinner ? el('div', { class: 'spinner' }) : el('span', { class: 'cam-msg-ic', html: icon(ic, { size: 30 }) }),
       title ? el('h2', {}, title) : null,
@@ -247,7 +248,7 @@ export async function open(ctx) {
       buttons.length ? el('div', { class: 'cam-msg-btns' }, buttons.map((b) => el('button', { type: 'button', class: b.primary ? 'btn btn-primary' : 'btn', onclick: b.onclick }, b.label))) : null));
     msg.hidden = false;
   }
-  function hidePanel() { msg.hidden = true; msg.replaceChildren(); }
+  function hidePanel() { fullPanelOpen = false; msg.hidden = true; msg.replaceChildren(); }
 
   // ---- state ---------------------------------------------------------------------------------------
 
@@ -272,6 +273,10 @@ export async function open(ctx) {
   let deviceCamOpen = false;
   let pinOpen = false;
   let pinView = null;
+  let pinEntry = null;            // the open pin check's history entry: {id, pushed, cancel} (the phone's Back closes it)
+  let phoneFull = false;          // a save failed for lack of space: no new shots until a save works again
+  let fullPanelOpen = false;      // the "phone is full" panel is the one on screen
+  let hideWait = null;            // the app was hidden while a photo was being taken: the camera is let go after it
   const jobs = [];                // every capture of this visit: {id, kind, state, …}
   let saveQueue = Promise.resolve();
   let savedCount = 0;
@@ -1004,6 +1009,9 @@ export async function open(ctx) {
         if (bmp && bmp.width === vw && bmp.height === vh) { src = bmp; method = 'grabFrame'; } else { media.releaseImage(bmp); bmp = null; cam.grabFrameOk = false; }
       } catch { bmp = null; cam.grabFrameOk = false; }
     }
+    // The camera may have been let go while grabFrame was awaited: a stopped
+    // video draws nothing, and a black photo must not be saved as the shot.
+    if (src === video && !video.videoWidth) throw new Error('The camera turned off before the picture was taken.');
     const { width, height } = media.scaleToFit(vw, vh, Infinity, media.IOS_SAFE_CANVAS_AREA);
     const c = media.makeCanvas(width, height);
     try {
@@ -1015,6 +1023,21 @@ export async function open(ctx) {
     } finally {
       media.freeCanvas(c);
       media.releaseImage(bmp);
+    }
+  }
+
+  /** The picture on screen now, drawn on a canvas at once (nothing awaited), or null. */
+  function snapFrame() {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return null;
+    const { width, height } = media.scaleToFit(vw, vh, Infinity, media.IOS_SAFE_CANVAS_AREA);
+    const c = media.makeCanvas(width, height);
+    try {
+      c.getContext('2d').drawImage(video, 0, 0, width, height);
+      return c;
+    } catch {
+      media.freeCanvas(c);
+      return null;
     }
   }
 
@@ -1057,8 +1080,12 @@ export async function open(ctx) {
   }
 
   const pendingCount = () => jobs.filter((j) => j.state === 'capturing' || j.state === 'saving').length;
-  const pendingPhotos = () => jobs.filter((j) => j.kind === 'photo' && (j.state === 'capturing' || j.state === 'saving')).length;
+  // Photos held only in memory, each a full-size picture: being taken or
+  // saved, or failed and not downloaded yet (a failed one is never dropped).
+  const heldPhotos = () => jobs.filter((j) => j.kind === 'photo' && (j.state === 'capturing' || j.state === 'saving' || (j.state === 'failed' && !j.downloaded))).length;
   const failedJobs = () => jobs.filter((j) => j.state === 'failed');
+  const unsavedJobs = () => failedJobs().filter((j) => !j.downloaded);
+  const blockedFull = () => phoneFull && unsavedJobs().length > 0;
 
   /** The camera's facts at the tap (which lens, zoom, preview size) — saved with the photo. */
   function cameraFacts() {
@@ -1122,6 +1149,7 @@ export async function open(ctx) {
       lastItem = item;
       reloadItems();
     }
+    roomAgain();
   }
 
   function onJobFailed(job, err) {
@@ -1129,6 +1157,7 @@ export async function open(ctx) {
     job.error = err;
     job.retry = typeof err?.retry === 'function' ? err.retry : null;
     if (err?.blob) job.blob = err.blob;
+    if (isStorageFull(err)) phoneFull = true;
     console.error('[camera] save failed', err);
     const what = job.kind === 'video' ? 'video' : 'photo';
     const base = err?.message || `The ${what} was not saved.`;
@@ -1139,6 +1168,44 @@ export async function open(ctx) {
     }
     toast(`${base} Tap the red thumbnail to try again or to download it.`, { type: 'err', action: job.blob ? { label: 'Download', onclick: () => downloadJob(job) } : undefined });
     renderTile();
+    renderShutter();
+    if (blockedFull()) showFullPanel();
+  }
+
+  /**
+   * The phone is full (docs/RESEARCH.md: stop capture on QuotaExceededError).
+   * Every new shot would only live in memory, and all of them are gone if the
+   * phone closes the app, so the shutter waits until what is not saved is
+   * downloaded or a save works again.
+   */
+  function showFullPanel() {
+    const left = unsavedJobs();
+    if (closed || camState !== 'live' || !left.length) return;
+    const photos = left.every((j) => j.kind === 'photo');
+    const what = left.length > 1 ? `the ${left.length} ${photos ? 'photos' : 'photos and videos'}` : `the ${left[0].kind === 'video' ? 'video' : 'photo'}`;
+    showPanel({
+      ic: 'warning',
+      title: 'The phone is full',
+      text: `Save ${what} not saved yet, or free space on the phone, before taking more. Until then ${left.length > 1 ? 'they are' : 'it is'} only on this screen.`,
+      buttons: [
+        { label: left.length > 1 ? 'Save them' : 'Save it', primary: true, onclick: () => openFailedSheet() },
+        { label: 'Close', onclick: () => hidePanel() },
+      ],
+    });
+    fullPanelOpen = true;
+  }
+
+  /** The "phone is full" panel follows what is left to save (it goes once nothing is). */
+  function refreshFullPanel() {
+    if (!fullPanelOpen || closed) return;
+    if (blockedFull()) showFullPanel(); else hidePanel();
+  }
+
+  /** A save worked: there is room again, so the shutter is free. */
+  function roomAgain() {
+    phoneFull = false;
+    if (closed) return;
+    refreshFullPanel();
     renderShutter();
   }
 
@@ -1170,10 +1237,22 @@ export async function open(ctx) {
   /** Get the picture for a shot. Resolves true when it is in memory and ready to save. */
   async function capturePhoto(job) {
     let shot;
+    let standIn = null;
     try {
       const fast = cam.photoInFlight || !cam.ic || !cam.takePhotoOk;
       if (!fast) {
+        // A full-resolution photo takes a second or two. The picture on
+        // screen AT THE TAP is kept meanwhile: if the photo does not come
+        // (the phone was locked, the camera let go), that picture is the
+        // shot — not a later one, and not nothing.
+        standIn = snapFrame();
         try { shot = await takeFullPhoto(); } catch (err) { console.warn('[camera] full-resolution photo failed; using the video picture', err); }
+        if (!shot && standIn) {
+          try {
+            const out = await media.encodeCanvas(standIn, 'image/jpeg', num(S().photoQuality) ?? 0.92);
+            shot = { blob: out.blob, width: out.width, height: out.height, orientation: 1, method: 'canvas' };
+          } catch (err) { console.warn('[camera] the picture kept at the tap could not be used', err); }
+        }
       }
       if (!shot) shot = await grabFrame();
     } catch (err) {
@@ -1185,6 +1264,8 @@ export async function open(ctx) {
         renderShutter();
       }
       return false;
+    } finally {
+      if (standIn) media.freeCanvas(standIn);
     }
     try {
       shot = await turnUpright(shot, job.upright, job.screenAngle);
@@ -1204,8 +1285,16 @@ export async function open(ctx) {
       toast(camState === 'error' ? 'The camera is off — see the message on screen.' : 'The camera is not ready yet — one moment.', { type: 'warn', ms: 2500 });
       return;
     }
-    if (pendingPhotos() >= MAX_PENDING_PHOTOS) {
-      toast('Still saving the last photos — one moment, then take the next.', { type: 'warn', ms: 2500 });
+    if (blockedFull()) {
+      showFullPanel();
+      buzz([30, 40, 30]);
+      return;
+    }
+    if (heldPhotos() >= MAX_PENDING_PHOTOS) {
+      const notSaved = jobs.filter((j) => j.kind === 'photo' && j.state === 'failed' && !j.downloaded).length;
+      toast(notSaved
+        ? `${notSaved > 1 ? `${notSaved} photos are` : 'A photo is'} not saved yet — tap the red thumbnail to try again or download, then take the next.`
+        : 'Still saving the last photos — one moment, then take the next.', { type: 'warn', ms: notSaved ? 6000 : 2500 });
       buzz([30, 40, 30]);
       return;
     }
@@ -1228,6 +1317,7 @@ export async function open(ctx) {
     // numbered) in the order they were taken, even when a quick second shot
     // is ready before a slower full-resolution first one.
     const captured = capturePhoto(job);
+    job.captured = captured; // the app being hidden waits for it before letting the camera go
     saveQueue = saveQueue.then(async () => { if (await captured) await runPhotoSave(job); });
   }
 
@@ -1264,7 +1354,7 @@ export async function open(ctx) {
     const recording = !!recorder;
     shutterBtn.classList.toggle('video', mode === 'video');
     shutterBtn.classList.toggle('rec', recording);
-    shutterBtn.classList.toggle('busy', mode === 'photo' && pendingPhotos() >= MAX_PENDING_PHOTOS);
+    shutterBtn.classList.toggle('busy', mode === 'photo' && (heldPhotos() >= MAX_PENDING_PHOTOS || blockedFull()));
     shutterBtn.disabled = startingVideo;
     shutterBtn.setAttribute('aria-label', mode === 'video' ? (recording ? 'Stop recording and save' : 'Start recording') : 'Take photo');
     photoSeg.classList.toggle('on', mode === 'photo');
@@ -1334,6 +1424,7 @@ export async function open(ctx) {
   async function startVideo() {
     if (recorder || startingVideo) return;
     if (!camReady()) { toast('The camera is not ready yet — one moment.', { type: 'warn', ms: 2500 }); return; }
+    if (blockedFull()) { showFullPanel(); buzz([30, 40, 30]); return; }
     startingVideo = true;
     renderShutter();
     let r = null;
@@ -1427,6 +1518,7 @@ export async function open(ctx) {
       toast(`Video saved (${formatDuration(item.duration || 0)}).`, { type: 'ok' });
       reloadItems();
     }
+    roomAgain();
   }
 
   // ---- the last capture --------------------------------------------------------------------------
@@ -1526,35 +1618,58 @@ export async function open(ctx) {
     return run();
   }
 
+  /**
+   * Keep a copy of a photo or video that is not saved, as a file. Resolves
+   * true only when it was saved or shared, or its download started. Each
+   * call needs its own tap: the share sheet and the Save-as picker use up the
+   * tap that opened them, so a second save straight after is refused
+   * ('needs-tap') — then it is NOT counted as downloaded, and a Save button
+   * asks for a new tap.
+   */
   async function downloadJob(job) {
-    if (!job.blob) { toast('There is nothing to download for this one — take it again.', { type: 'warn' }); return; }
+    if (!job.blob) { toast('There is nothing to download for this one — take it again.', { type: 'warn' }); return false; }
+    const what = job.kind === 'video' ? 'video' : 'photo';
     const ext = job.kind === 'video' ? media.extForMime(job.blob.type, 'mp4') : 'jpg';
     const name = `${safeFileName(project.name || 'Job walk')} ${stamp(job.tapAt)}.${ext}`;
+    const again = { label: closed ? 'Download' : 'Save', onclick: () => downloadJob(job) };
+    let r;
     try {
-      const r = await saveBlob(job.blob, name, { title: name });
-      if (r !== 'cancelled') {
-        job.downloaded = true;
-        toast(r === 'shared' ? 'A copy was saved.' : 'Downloaded — look in Downloads (Files on iPhone).', { type: 'ok' });
-      }
+      r = await saveBlob(job.blob, name, { title: name });
     } catch (err) {
-      toast(`The download did not start: ${err?.message || err}`, { type: 'err' });
+      toast(`The download did not start: ${err?.message || err}${closed ? ` Download the ${what} now so it is not lost.` : ''}`, { type: 'err', action: again });
+      return false;
     }
+    if (r === 'saved' || r === 'shared' || r === 'downloaded') {
+      job.downloaded = true;
+      toast(r === 'downloaded' ? 'Downloaded — look in Downloads (Files on iPhone).' : 'A copy was saved.', { type: 'ok' });
+      if (!closed) { renderTile(); renderShutter(); refreshFullPanel(); }
+      return true;
+    }
+    if (r === 'needs-tap') {
+      toast(`The phone wants one more tap to keep this ${what}: tap ${again.label}.`, { type: closed ? 'err' : 'warn', ms: 0, action: again });
+    } else if (closed) {
+      // Cancelled after the screen was left: this toast is the only way left to keep it.
+      toast(`The ${what} is still not saved. Download it now so it is not lost.`, { type: 'err', action: again });
+    }
+    return false;
   }
 
-  function openFailedSheet() {
+  function openFailedSheet({ lead = '' } = {}) {
     const failed = failedJobs();
     if (!failed.length) return;
     const sh = openSheet({ title: failed.length > 1 ? `${failed.length} not saved yet` : 'Not saved yet' });
-    sh.body.append(el('p', { class: 'muted' }, 'These are only on this screen, not on the phone yet. Try again, or download them so you keep a copy.'));
+    sh.body.append(el('p', { class: 'muted' }, lead || 'These are only on this screen, not on the phone yet. Try again, or download them so you keep a copy.'));
     for (const j of failed) {
+      const mark = el('span', {}, j.downloaded ? ' · downloaded' : '');
       sh.body.append(el('div', { class: 'cam-failed-row' },
         el('span', { class: 'cam-failed-prev' }, previewNode(j, 56)),
         el('div', { class: 'grow' },
-          el('div', { class: 't' }, `${j.kind === 'video' ? 'Video' : 'Photo'} · ${formatTime(j.tapAt)}`, j.downloaded ? ' · downloaded' : ''),
+          el('div', { class: 't' }, `${j.kind === 'video' ? 'Video' : 'Photo'} · ${formatTime(j.tapAt)}`, mark),
           el('div', { class: 's' }, j.error?.message || 'Not saved.')),
         el('div', { class: 'cam-failed-btns' },
           el('button', { type: 'button', class: 'btn btn-sm btn-primary', onclick: () => { sh.close(true); retryJob(j); } }, 'Try again'),
-          el('button', { type: 'button', class: 'btn btn-sm', disabled: !j.blob, onclick: () => downloadJob(j) }, 'Download'))));
+          // One Download per row: each file is saved from its own tap.
+          el('button', { type: 'button', class: 'btn btn-sm', disabled: !j.blob, onclick: () => downloadJob(j).then((ok) => { if (ok) mark.textContent = ' · downloaded'; }) }, 'Download'))));
     }
     if (failed.length > 1) {
       sh.body.append(el('button', { type: 'button', class: 'btn btn-primary btn-block', onclick: () => { sh.close(true); failed.forEach((j) => retryJob(j)); } }, 'Try all again'));
@@ -1599,6 +1714,23 @@ export async function open(ctx) {
     const host = el('div', { class: 'cam-pin', role: 'dialog', 'aria-label': 'Check the pin' }, viewHost);
     camEl.append(host);
     let view = null;
+    // A history entry with the same URL, so the phone's Back button closes
+    // the pin check (popstate, no hashchange) instead of leaving the camera.
+    // It is marked with its own id, not just "an overlay": after a reload the
+    // entry the camera opened on may still say it was one.
+    const entry = {
+      id: uid('pin_'),
+      pushed: false,
+      cancelled: false,
+      // Ends the pick with nothing set (also while the plan is still loading).
+      cancel() { entry.cancelled = true; host.remove(); try { view?.destroy(); } catch { /* gone */ } },
+    };
+    pinEntry = entry;
+    try {
+      history.pushState({ ...(history.state || {}), jwDepth: (history.state?.jwDepth || 0) + 1, jwCamOverlay: entry.id }, '', location.href);
+      entry.pushed = true;
+    } catch { /* the back button then leaves the camera, as before */ }
+    const gone = () => closed || entry.cancelled;
     try {
       let where = null;
       const n = target?.item?.seq ? ` #${target.item.seq}` : '';
@@ -1606,9 +1738,9 @@ export async function open(ctx) {
       const hint = 'Move the plan until the cross is exactly where you stood. Set saves it — and makes the next photos more accurate.';
       if (level?.plan) {
         const img = await loadPlanImage();
-        if (!img || closed) return;
+        if (!img || gone()) return;
         const { createPlanView } = await import('./plan-view.js');
-        if (closed) return;
+        if (gone()) return;
         view = createPlanView(viewHost, { image: img.image, width: img.width, height: img.height, interactive: true, units: units(), pxPerMeter: level.calibration?.pxPerMeter || null });
         pinView = view;
         view.setItems(levelItems);
@@ -1618,18 +1750,18 @@ export async function open(ctx) {
         if (pt) where = { plan: { x: pt.x, y: pt.y } };
       } else {
         const { createMapView } = await import('./map-view.js');
-        if (closed) return;
+        if (gone()) return;
         const c = target?.pose?.geo || lastPose?.geo || project.origin;
         view = createMapView(viewHost, { center: c ? { lat: c.lat, lng: c.lng } : undefined, zoom: 20, interactive: true });
         pinView = view;
         view.setItems(levelItems);
         if (lastPose) view.setPose(lastPose);
         await view.ready;
-        if (closed) return;
+        if (gone()) return;
         const pt = await view.pickPoint({ title, hint, initial: c ? { lat: c.lat, lng: c.lng } : null, setLabel: 'Set spot' });
         if (pt) where = { geo: { lat: pt.lat, lng: pt.lng } };
       }
-      if (!where || closed) return;
+      if (!where || gone()) return;
       let fixed = false;
       let fixNote = '';
       if (shouldFixPosition(target)) {
@@ -1654,6 +1786,13 @@ export async function open(ctx) {
       if (pinView === view) pinView = null;
       host.remove();
       pinOpen = false;
+      if (pinEntry === entry) pinEntry = null;
+      // Set or Cancel: take the entry back off — only while it is still on top
+      // (Back already took it; a closed camera is no longer this page).
+      if (entry.pushed && !closed && history.state?.jwCamOverlay === entry.id) {
+        entry.pushed = false;
+        try { history.back(); } catch { /* fine */ }
+      }
     }
   }
 
@@ -1677,12 +1816,19 @@ export async function open(ctx) {
         if (where.geo) {
           if (!('geoAuto' in p)) p.geoAuto = p.geo || null;
           p.geo = { lat: where.geo.lat, lng: where.geo.lng, acc: 0.3, alt: p.geo?.alt ?? null, altAcc: p.geo?.altAcc ?? null };
-          if (enu) {
-            if (!('enuAuto' in p)) p.enuAuto = p.enu || null;
-            p.enu = { e: enu.e, n: enu.n };
-          }
+          if (!('enuAuto' in p)) p.enuAuto = p.enu || null;
+          // The meters east/north follow the hand-placed spot. When they cannot
+          // be worked out here, the measured ones must not stay: they come
+          // first when the pin is placed on a plan later, and would put it
+          // back where the GPS had it.
+          p.enu = enu ? { e: enu.e, n: enu.n } : null;
         }
-        p.planLocked = true;
+        // Only a spot set ON THE PLAN is locked there. A spot set on the map is
+        // a ground position: when a plan is added and calibrated later, the pin
+        // is placed on it from there (a locked pin is never moved). pinnedAt
+        // says it was placed by hand either way.
+        if (where.plan) p.planLocked = true;
+        else if (!p.plan) p.planLocked = false;
         p.pinnedAt = Date.now();
         it.pose = p;
         return it;
@@ -1893,14 +2039,14 @@ export async function open(ctx) {
         if (!leave) return false;
       }
     }
-    const failed = failedJobs().filter((j) => !j.downloaded);
+    const failed = unsavedJobs();
     if (failed.length) {
       const what = failed.length > 1 ? `${failed.length} photos or videos are` : `A ${failed[0].kind === 'video' ? 'video' : 'photo'} is`;
       const pick = await choose({
         title: `${what} not saved`,
         options: [
           { value: 'retry', icon: 'restore', label: 'Try saving again' },
-          { value: 'download', icon: 'download', label: 'Download them', detail: 'Keeps a copy in Downloads (Files on iPhone)' },
+          { value: 'download', icon: 'download', label: failed.length > 1 ? 'Download them' : 'Download it', detail: failed.length > 1 ? 'One tap for each file — keeps a copy in Downloads (Files on iPhone)' : 'Keeps a copy in Downloads (Files on iPhone)' },
           { value: 'stay', icon: 'close', label: 'Stay here' },
         ],
       });
@@ -1911,8 +2057,16 @@ export async function open(ctx) {
         return true;
       }
       if (pick === 'download') {
-        for (const j of failed) await downloadJob(j);
-        return failedJobs().every((j) => j.downloaded);
+        // Only one file from this tap: the share sheet or Save-as picker uses
+        // it up, so a second save straight after would be refused. The rest
+        // get a Download button each, and the screen stays until all are kept.
+        await downloadJob(failed[0]);
+        const left = unsavedJobs();
+        if (!left.length) return true;
+        openFailedSheet({ lead: left.length > 1
+          ? `${left.length} are not kept yet. Tap Download on each one (one tap per file), then leave again. Until then they are only on this screen.`
+          : 'One is not kept yet. Tap its Download, then leave again. Until then it is only on this screen.' });
+        return false;
       }
       return false;
     }
@@ -1937,6 +2091,26 @@ export async function open(ctx) {
     // A recording finishes and saves (recorder.js does it too — this makes sure it happens before the camera stops).
     if (recorder) stopVideo('hidden');
     if (deviceCamOpen) return; // the phone's camera app is in front; ours is already off
+    // The phone locked right after the shutter: the photo being taken is let
+    // finish first (3 s at most) — stopping the camera now would lose it.
+    const taking = jobs.filter((j) => j.state === 'capturing' && j.captured);
+    if (taking.length || hideWait) {
+      if (!hideWait) {
+        hideWait = Promise.race([
+          Promise.all(taking.map((j) => j.captured)),
+          new Promise((r) => setTimeout(r, 3000)),
+        ]).catch(() => {}).then(() => {
+          hideWait = null;
+          if (!closed && document.visibilityState === 'hidden') letCameraGo();
+        });
+      }
+      return;
+    }
+    letCameraGo();
+  }
+
+  function letCameraGo() {
+    if (deviceCamOpen) return;
     stopStream();
     if (!recorder) { if (mic) { stopTracks(mic); mic = null; } }
     if (camState !== 'gate' && camState !== 'error') setCamState('paused');
@@ -1951,6 +2125,13 @@ export async function open(ctx) {
   listen(document, 'visibilitychange', () => { if (document.visibilityState === 'hidden') onHidden(); else onVisible(); });
   listen(window, 'pagehide', () => onHidden());
   listen(window, 'pageshow', (e) => { if (e.persisted) onVisible(); });
+  // The phone's Back while the pin check is open closes the pin check, not the camera.
+  listen(window, 'popstate', () => {
+    if (pinEntry?.pushed && history.state?.jwCamOverlay !== pinEntry.id) {
+      pinEntry.pushed = false;
+      pinEntry.cancel();
+    }
+  });
 
   // ---- start ---------------------------------------------------------------------------------------
 

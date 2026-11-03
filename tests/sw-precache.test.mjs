@@ -44,6 +44,17 @@ test('every module the app can load is precached', () => {
   assert.deepEqual(notListed, []);
 });
 
+test('a new version waits instead of taking over a running page', () => {
+  // Taking over would serve new files for screens not loaded yet next to the
+  // old modules already in memory. It takes over only when the page asks
+  // (main.js, after the screen allows leaving it).
+  const install = sw.match(/addEventListener\('install'[\s\S]*?\n\}\);/)[0].replace(/\/\/.*$/gm, '');
+  assert.doesNotMatch(install, /skipWaiting\s*\(/);
+  assert.match(sw, /event\.data === 'skipWaiting'\) self\.skipWaiting\(\)/);
+  const main = fs.readFileSync(path.join(ROOT, 'js/main.js'), 'utf8');
+  assert.match(main, /postMessage\('skipWaiting'\)/);
+});
+
 test('every stylesheet index.html links is precached', () => {
   const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
   const css = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map((m) => m[1]);

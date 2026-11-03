@@ -19,7 +19,9 @@
  * own HTTP cache already does.
  *
  * Bump CACHE whenever the app changes, or an installed copy keeps serving
- * the old one. A new file the app loads goes in PROGRAM —
+ * the old one — and a new version installing into the SAME cache would
+ * swap files under the version still running (it waits; see install).
+ * A new file the app loads goes in PROGRAM —
  * tests/sw-precache.test.mjs fails when one is missing or listed but absent.
  */
 const CACHE = 'jobwalk-v1';
@@ -100,7 +102,11 @@ self.addEventListener('install', (event) => {
     // cache: 'reload' skips the HTTP cache, so a new version never installs
     // with a stale copy of one of its own files.
     await cache.addAll(PROGRAM.map((u) => new Request(u, { cache: 'reload' })));
-    await self.skipWaiting();
+    // No skipWaiting() here: a new version waits until every window of the
+    // app is closed, or the page asks for it ('skipWaiting' message below,
+    // sent when the person taps Update — main.js then reloads). Taking over
+    // a running page would serve it the NEW files for screens it has not
+    // loaded yet, next to the OLD modules already in memory, mid-walk.
   })());
 });
 

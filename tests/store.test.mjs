@@ -181,6 +181,155 @@ test('parts left by an unfinished save are cleaned up later, not right away', as
   assert.equal((await db.getAllKeys('parts', db.rangeFor('m_stray'))).length, 0);
 });
 
+test('Delete forever keeps what was restored meanwhile (another window)', async () => {
+  const p = await store.createProject({ name: 'Restored meanwhile' });
+  const item = await store.createItem(p.id, { type: 'photo', levelId: p.activeLevelId });
+  const mid = await store.putMedia(new Blob([new Uint8Array(10)]), { kind: 'original', projectId: p.id, itemId: item.id });
+  const shown = (await store.softDeleteItem(item.id)).deletedAt;   // what Recently Deleted showed
+  await store.restoreItem(item.id);
+  await assert.rejects(store.purgeItem(item.id, { deletedAt: shown }), (err) => err.kept === true && /restored/.test(err.message));
+  await assert.rejects(store.purgeItem(item.id), (err) => err.kept === true, 'a live item is never erased');
+  // Restored and deleted again since: not the deletion that was confirmed.
+  await store.updateItem(item.id, (i) => { i.deletedAt = shown + 5; });
+  await assert.rejects(store.purgeItem(item.id, { deletedAt: shown }), (err) => err.kept === true);
+  assert.ok(await store.getItem(item.id));
+  assert.ok(await store.getMediaBlob(mid));
+  // Still deleted from the moment shown: erased with its bytes.
+  await store.purgeItem(item.id, { deletedAt: shown + 5 });
+  assert.equal(await store.getItem(item.id), undefined);
+  assert.equal(await store.getMediaBlob(mid), null);
+  await store.purgeItem(item.id); // already gone: nothing to do
+
+  const q = await store.createProject({ name: 'Walk restored meanwhile' });
+  const qi = await store.createItem(q.id, { type: 'photo', levelId: q.activeLevelId });
+  const qm = await store.putMedia(new Blob([new Uint8Array(10)]), { kind: 'original', projectId: q.id, itemId: qi.id });
+  const qShown = (await store.softDeleteProject(q.id)).deletedAt;
+  await store.restoreProject(q.id);
+  await assert.rejects(store.purgeProject(q.id, { deletedAt: qShown }), (err) => err.kept === true && /Walk restored meanwhile/.test(err.message));
+  assert.ok(await store.getProject(q.id));
+  assert.ok(await store.getItem(qi.id));
+  assert.ok(await store.getMediaBlob(qm));
+  const again = (await store.softDeleteProject(q.id)).deletedAt;
+  await store.purgeProject(q.id, { deletedAt: again });
+  assert.equal(await store.getProject(q.id), undefined);
+  assert.equal(await store.getItem(qi.id), undefined);
+  assert.equal(await store.getMediaBlob(qm), null);
+});
+
+test('replacing a plan takes pins off the old image; a pin placed by hand keeps its ground spot', async () => {
+  const { reprojectItems } = await import('../js/core/calibration.js');
+  const p = await store.createProject({ name: 'Plan swap' });
+  const lid = p.activeLevelId;
+  const other = await store.addLevel(p.id, 'Level 2');
+  await store.setLevelPlan(p.id, lid, new Blob([new Uint8Array(20)], { type: 'image/png' }), { width: 100, height: 50 });
+  // 10 px per meter, plan y down = north up.
+  const cal = { version: 1, pxPerMeter: 10, northAngle: 0, toPlan: [10, 0, 0, -10, 0, 0], toEnu: [0.1, 0, 0, -0.1, 0, 0] };
+  await store.setCalibration(p.id, lid, cal);
+  const oldPlanId = store.getLevel(await store.getProject(p.id), lid).plan.mediaId;
+  const gps = await store.createItem(p.id, { type: 'photo', levelId: lid, pose: { plan: { x: 10, y: 20 }, planAcc: 5, planHeading: 30, planLocked: false, enu: { e: 1, n: -2 }, heading: 30 } });
+  const hand = await store.createItem(p.id, { type: 'note', levelId: lid, pose: { plan: { x: 30, y: 40 }, planLocked: true, enu: { e: 9, n: 9 }, planAuto: { x: 1, y: 1 } } });
+  const video = await store.createItem(p.id, { type: 'video', levelId: lid, pose: { plan: null }, track: [{ t: 0, x: 1, y: 2, e: 0.1, n: -0.2, planHeading: 5 }, { t: 1000, x: null, y: null }] });
+  const elsewhere = await store.createItem(p.id, { type: 'photo', levelId: other.id, pose: { plan: { x: 7, y: 7 } } });
+  const seen = [];
+  const off = bus.on('store:change', (e) => { if (e.kind === 'item') seen.push(e.id); });
+  await store.setLevelPlan(p.id, lid, new Blob([new Uint8Array(30)], { type: 'image/png' }), { width: 200, height: 80 });
+  off();
+
+  const g = await store.getItem(gps.id);
+  assert.equal(g.pose.plan, null, 'no spot in the new image until it is calibrated');
+  assert.deepEqual({ ...g.pose.planPrev, at: 0 }, { mediaId: oldPlanId, at: 0, x: 10, y: 20, planAcc: 5, planHeading: 30, planLocked: false });
+  assert.deepEqual(g.pose.enu, { e: 1, n: -2 }, 'its GPS position is untouched');
+
+  const h = await store.getItem(hand.id);
+  assert.equal(h.pose.plan, null);
+  assert.equal(h.pose.planLocked, false, 'so the new calibration places it');
+  assert.deepEqual(h.pose.enu, { e: 3, n: -4 }, 'the hand-placed spot, on the ground (old calibration)');
+  assert.deepEqual(h.pose.planPrev.enu, { e: 9, n: 9 }, 'the position it had is kept');
+  assert.deepEqual(h.pose.planPrev.planAuto, { x: 1, y: 1 });
+  assert.equal('planAuto' in h.pose, false);
+
+  const v = await store.getItem(video.id);
+  assert.equal(v.track[0].x, null);
+  assert.equal(v.track[0].e, 0.1);
+  assert.deepEqual(v.pose.planPrev.track, [{ t: 0, x: 1, y: 2, planHeading: 5 }]);
+
+  assert.deepEqual((await store.getItem(elsewhere.id)).pose.plan, { x: 7, y: 7 }, 'other levels are not touched');
+  assert.deepEqual(seen.sort(), [gps.id, hand.id, video.id].sort());
+
+  // Once the new plan is calibrated, the hand-placed pin lands where it was put.
+  const cal2 = { version: 1, pxPerMeter: 20, northAngle: 0, toPlan: [20, 0, 0, -20, 0, 0], toEnu: [0.05, 0, 0, -0.05, 0, 0] };
+  await store.setCalibration(p.id, lid, cal2);
+  const level = store.getLevel(await store.getProject(p.id), lid);
+  const moved = reprojectItems([h, g], level, null);
+  assert.deepEqual(moved.find((m) => m.id === hand.id).pose.plan, { x: 60, y: 80 });
+  assert.deepEqual(moved.find((m) => m.id === gps.id).pose.plan, { x: 20, y: 40 });
+
+  // A third plan keeps the spots of the second inside the new planPrev.
+  await store.updateItem(hand.id, (i) => { i.pose.plan = { x: 60, y: 80 }; });
+  await store.setLevelPlan(p.id, lid, new Blob([new Uint8Array(40)], { type: 'image/png' }), { width: 300, height: 90 });
+  const h3 = await store.getItem(hand.id);
+  assert.deepEqual([h3.pose.planPrev.x, h3.pose.planPrev.before.x], [60, 30]);
+});
+
+test('a plan put on a level whose plan image did not come through an import takes its pins off too', async () => {
+  const p = await store.createProject({ name: 'Plan lost in import' });
+  const lid = p.activeLevelId;
+  // As importPackage leaves it: no plan, the lost one (and its calibration) in planHistory.
+  const cal = { version: 1, pxPerMeter: 10, northAngle: 0, toPlan: [10, 0, 0, -10, 0, 0], toEnu: [0.1, 0, 0, -0.1, 0, 0], planMediaId: null };
+  await store.updateLevel(p.id, lid, (l) => {
+    l.plan = null;
+    l.planHistory = [{ mediaId: null, width: 100, height: 50, calibration: cal, replacedAt: 1 }];
+  });
+  const hand = await store.createItem(p.id, { type: 'note', levelId: lid, pose: { plan: { x: 30, y: 40 }, planLocked: true } });
+  await store.setLevelPlan(p.id, lid, new Blob([new Uint8Array(20)], { type: 'image/png' }), { width: 200, height: 80 });
+  const h = await store.getItem(hand.id);
+  assert.equal(h.pose.plan, null, 'not drawn at the lost image\'s pixels on the new one');
+  assert.deepEqual(h.pose.enu, { e: 3, n: -4 }, 'placed again by the new calibration');
+  assert.equal(h.pose.planPrev.x, 30);
+  assert.equal(store.getLevel(await store.getProject(p.id), lid).planHistory.length, 1, 'the lost plan is not listed twice');
+});
+
+test('a URL scope released while a file is still being read makes no URL (nothing would revoke it)', async () => {
+  const p = await store.createProject({ name: 'Scope' });
+  const id = await store.putMedia(new Blob([new Uint8Array(64)], { type: 'image/jpeg' }), { kind: 'thumb', projectId: p.id });
+  const made = [];
+  const real = URL.createObjectURL;
+  URL.createObjectURL = (b) => { const u = real(b); made.push(u); return u; };
+  try {
+    const scope = store.createUrlScope();
+    const a = scope.url(id);
+    const b = scope.url(id);
+    scope.release();
+    assert.deepEqual([await a, await b], [null, null]);
+    assert.equal(made.length, 0);
+    assert.equal(await scope.url(id), null, 'a released scope stays released');
+    // Many asking at once: one read, one URL.
+    const s2 = store.createUrlScope();
+    const [u1, u2] = await Promise.all([s2.url(id), s2.url(id)]);
+    assert.ok(u1);
+    assert.equal(u1, u2);
+    assert.equal(made.length, 1);
+    assert.equal(await s2.url(id), u1);
+    s2.release();
+  } finally {
+    URL.createObjectURL = real;
+    for (const u of made) URL.revokeObjectURL(u);
+  }
+});
+
+test('files of a job walk still being imported are left alone while the import runs', { skip: globalThis.navigator?.locks?.query ? false : 'no Web Locks in this Node' }, async () => {
+  const mid = await store.putMedia(new Blob([new Uint8Array(20)], { type: 'image/jpeg' }), { kind: 'original', projectId: 'p_importing', itemId: 'i_importing' });
+  const later = Date.now() + 11 * 60 * 1000;
+  const inside = await store.withImportLock(async () => {
+    const out = await store.recoverOrphans({ now: later });
+    return { removed: out.mediaRemoved, kept: !!(await store.getMediaRecord(mid)) };
+  });
+  assert.deepEqual(inside, { removed: 0, kept: true });
+  // The import died without writing its job walk: a later start cleans up.
+  await store.recoverOrphans({ now: later });
+  assert.equal(await store.getMediaRecord(mid), undefined);
+});
+
 test('recording chunk seqs are listed in order', async () => {
   const rec = await store.beginRecording({ projectId: 'p_y', levelId: 'l_y', mimeType: 'video/mp4' });
   for (const s of [2, 0, 1]) await store.putChunk(rec.recId, s, new Blob([String(s)], { type: 'video/mp4' }));

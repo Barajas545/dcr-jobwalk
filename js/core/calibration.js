@@ -436,17 +436,20 @@ function accuracyMeters(pose, previous) {
 }
 
 const near = (a, b) => (a == null && b == null) || (fin(a) && fin(b) && Math.abs(a - b) < 1e-6);
+const validPt = (p) => !!p && fin(p.x) && fin(p.y);
+const HAND_PIN_M = 0.3; // m — how well a pin placed by hand on the plan shows the spot (camera-screen applyPin)
 
-function reprojectTrack(track, cal, origin, toEnu) {
+/** New plan points and directions for a video's path; `keepXY` (a pin placed by hand) changes only the directions. */
+function reprojectTrack(track, cal, origin, toEnu, { keepXY = false } = {}) {
   let changed = false;
   const out = track.map((pt) => {
     if (!pt || typeof pt !== 'object') return pt;
     let e = pt.e, n = pt.n;
-    if (!(fin(e) && fin(n)) && fin(pt.lat) && fin(pt.lng) && origin && fin(origin.lat) && fin(origin.lng)) {
+    if (!keepXY && !(fin(e) && fin(n)) && fin(pt.lat) && fin(pt.lng) && origin && fin(origin.lat) && fin(origin.lng)) {
       try { ({ e, n } = toEnu(origin, pt.lat, pt.lng)); } catch { e = n = null; }
     }
     const next = { ...pt };
-    if (fin(e) && fin(n)) {
+    if (!keepXY && fin(e) && fin(n)) {
       const [x, y] = applyAffine(cal.toPlan, e, n);
       next.x = x; next.y = y;
     }
@@ -464,7 +467,10 @@ function reprojectTrack(track, cal, origin, toEnu) {
  * (pose.planLocked !== true) and that has a ground position (pose.enu, or
  * pose.geo + `origin`): pose.plan, pose.planAcc and pose.planHeading, and each
  * video track point's x, y and planHeading, are recomputed with
- * level.calibration. Items whose pins would not move are left out.
+ * level.calibration. A pin placed by hand on the plan (planLocked with a plan
+ * point) keeps its spot and its path; only what comes from the calibration is
+ * recomputed — planHeading (from the true heading) and planAcc's size in
+ * pixels. Items whose pins would not change are left out.
  *
  * opts.previous: the calibration the stored planAcc values were made with
  *   (the level's calibration before this one), so the accuracy circle keeps
@@ -480,12 +486,33 @@ export function reprojectItems(items, level, origin, { previous = null, toEnu = 
   for (const item of items || []) {
     if (!item || item.levelId !== level.id) continue;
     const pose = item.pose;
-    if (pose && pose.planLocked === true) continue;
-    const enu = pose ? poseEnu(pose, origin, toEnu) : null;
-    const tr = Array.isArray(item.track) ? reprojectTrack(item.track, cal, origin, toEnu) : { track: item.track ?? null, changed: false };
-    if (!enu && !tr.changed) continue;
+    // Placed by hand: the spot stays. Which way the camera looked does not —
+    // it is the true heading turned by THIS calibration, and nobody can set it
+    // by hand, so a pin pinned before calibrating would otherwise never get a
+    // wedge, and a recalibration would leave its wedge at the old rotation.
+    // (A lock with no plan point has nothing on the plan to update.)
+    const locked = !!pose && pose.planLocked === true;
+    if (locked && !validPt(pose.plan)) continue;
+    const enu = pose && !locked ? poseEnu(pose, origin, toEnu) : null;
+    const tr = Array.isArray(item.track) ? reprojectTrack(item.track, cal, origin, toEnu, { keepXY: locked }) : { track: item.track ?? null, changed: false };
+    if (!enu && !locked && !tr.changed) continue;
     let nextPose = pose;
-    if (enu) {
+    if (locked) {
+      const ppmWas = previous && fin(previous.pxPerMeter) && previous.pxPerMeter > 0 && fin(cal.pxPerMeter) ? previous.pxPerMeter : null;
+      // The same size in meters at the new scale. Pinned while the plan had no
+      // scale at all (no previous calibration), the stored size is only a
+      // stand-in (the camera's 2 px): a spot placed by hand is good to about
+      // HAND_PIN_M, as the camera says once the plan is calibrated.
+      let planAcc = pose.planAcc ?? null;
+      if (fin(pose.planAcc) && ppmWas) planAcc = (pose.planAcc / ppmWas) * cal.pxPerMeter;
+      else if (fin(pose.planAcc) && !previous && fin(cal.pxPerMeter) && cal.pxPerMeter > 0) planAcc = HAND_PIN_M * cal.pxPerMeter;
+      nextPose = {
+        ...pose,
+        planAcc,
+        planHeading: fin(pose.heading) ? headingToPlan(cal, pose.heading) : (pose.planHeading ?? null),
+      };
+      if (near(pose.planAcc ?? null, nextPose.planAcc) && near(pose.planHeading ?? null, nextPose.planHeading)) nextPose = pose;
+    } else if (enu) {
       const [x, y] = applyAffine(cal.toPlan, enu.e, enu.n);
       const accM = accuracyMeters(pose, previous);
       nextPose = {

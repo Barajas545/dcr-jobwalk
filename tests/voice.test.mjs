@@ -468,3 +468,14 @@ test('tags reuse the spelling that exists; microphone problems are explained', (
   assert.equal(screen.typeLabel('note'), 'Note');
   assert.equal(screen.typeLabel('photo'), 'Photo');
 });
+
+test('only the two most recently used plans stay decoded in the shared cache', () => {
+  const cache = new Map([['plan:a', 'A'], ['view:p:l1', { zoom: 1 }], ['plan:b', 'B']]);
+  screen.keepPlanCached(cache, 'plan:a', 'A');   // a used again: b is now the oldest
+  screen.keepPlanCached(cache, 'plan:c', 'C');   // a third plan drops b
+  assert.deepEqual([...cache.keys()].filter((k) => k.startsWith('plan:')), ['plan:a', 'plan:c']);
+  assert.deepEqual(cache.get('view:p:l1'), { zoom: 1 }, 'other entries are left alone');
+  screen.keepPlanCached(cache, 'plan:d', 'D', 1);
+  assert.deepEqual([...cache.keys()], ['view:p:l1', 'plan:d']);
+  screen.keepPlanCached(null, 'plan:e', 'E');    // no cache: nothing to do
+});

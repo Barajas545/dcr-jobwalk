@@ -171,3 +171,33 @@ test('createMotionSource: steps and states from devicemotion events; unavailable
   bare.start();
   assert.equal(bare.getStatus(), 'unavailable');
 });
+
+test('createMotionSource: after the phone slept, event times run behind Date.now() — standing still is still "stationary"', () => {
+  const handlers = {};
+  const win = {
+    DeviceMotionEvent: function DeviceMotionEvent() {},
+    addEventListener: (type, fn) => { handlers[type] = fn; },
+    removeEventListener: (type) => { delete handlers[type]; },
+    performance: { timeOrigin: 1_700_000_000_000 },
+  };
+  const timers = { setTimeout: () => 1, clearTimeout: () => {} };
+  let clock = 1_700_000_000_000;
+  const src = createMotionSource({ win, timers, now: () => clock, weinberg: false });
+  src.start();
+  const feed = (samples, tsStart, sleptMs) => {
+    const t0 = samples[0].t;
+    for (const s of samples) {
+      // event.timeStamp is on the monotonic clock, which does not count the time asleep.
+      const ts = tsStart + (s.t - t0);
+      clock = 1_700_000_000_000 + sleptMs + ts;
+      handlers.devicemotion({ timeStamp: ts, accelerationIncludingGravity: { x: s.x, y: s.y, z: s.z } });
+    }
+  };
+  feed(synth([{ kind: 'still', seconds: 4 }], { seed: 22, noise: 0.08 }).samples, 1, 0);
+  assert.equal(src.getState(clock), 'stationary');
+  // Locked for 5 minutes, then held still again.
+  feed(synth([{ kind: 'still', seconds: 4 }], { seed: 23, noise: 0.08 }).samples, 5000, 300_000);
+  assert.equal(src.getState(clock), 'stationary', 'not "unknown" for the rest of the walk');
+  assert.equal(src.getState(clock + 2500), 'unknown', 'no sample for 2.5 s is still unknown');
+  src.stop();
+});

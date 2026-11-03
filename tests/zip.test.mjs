@@ -249,6 +249,96 @@ test('a damaged file is caught by verify; a truncated zip is refused', async () 
   await assert.rejects(readZip(new Blob([])), /too small/);
 });
 
+/** The central-directory record of each entry in a small zip our writer made: [{at, nlen}]. */
+function centralOf(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const eocd = bytes.length - 22;
+  let p = dv.getUint32(eocd + 16, true);
+  const out = [];
+  for (let i = dv.getUint16(eocd + 10, true); i > 0; i--) {
+    const nlen = dv.getUint16(p + 28, true);
+    out.push({ at: p, nlen });
+    p += 46 + nlen + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
+  }
+  return out;
+}
+
+test('errors say whether the bytes are damaged or the zip cannot be unpacked here', async () => {
+  const w = createZipWriter();
+  w.add('photo.jpg', new Blob([randomBytes(4000, 2)]));
+  w.add('other.jpg', new Blob([randomBytes(3000, 3)]));
+  const bytes = await bytesOf(await w.finish());
+  const bad = bytes.slice();
+  bad[30 + 9 + 9 + 100] ^= 0xff;
+  await assert.rejects((await readZip(new Blob([bad]), { verify: true })).entries[0].blob(), (e) => e.name === 'ZipError' && e.code === 'damaged');
+  const lzma = bytes.slice();
+  new DataView(lzma.buffer).setUint16(centralOf(lzma)[1].at + 10, 14, true);
+  const z = await readZip(new Blob([lzma]), { verify: true });
+  await assert.rejects(z.entry('other.jpg').blob(), (e) => e.name === 'ZipError' && e.code === 'unsupported' && /method 14/.test(e.message));
+  assert.equal((await z.entry('photo.jpg').blob()).size, 4000, 'the other entries still read');
+});
+
+test('names written with backslashes (Windows PowerShell) are read with forward slashes', async () => {
+  const w = createZipWriter();
+  w.add('media/photos/001-i_x.jpg', new Blob([randomBytes(500, 5)]));
+  w.add('media/plans/', null);
+  const bytes = await bytesOf(await w.finish());
+  const dv = new DataView(bytes.buffer);
+  const swap = (from, n) => { for (let i = 0; i < n; i++) if (bytes[from + i] === 0x2f) bytes[from + i] = 0x5c; };
+  for (const c of centralOf(bytes)) swap(c.at + 46, c.nlen);
+  swap(30, dv.getUint16(26, true));
+  const z = await readZip(new Blob([bytes]), { verify: true });
+  assert.deepEqual(z.entries.map((e) => e.name), ['media/photos/001-i_x.jpg', 'media/plans/']);
+  assert.equal((await z.entry('media/photos/001-i_x.jpg').blob()).size, 500);
+  assert.equal(z.entry('media/plans/').isDirectory, true);
+});
+
+test('unpacking stops as soon as an entry grows past the size its header gives', async () => {
+  const w = createZipWriter();
+  w.add('jobwalk.json', JSON.stringify({ pad: 'x'.repeat(200000) }), { compress: true });
+  const bytes = await bytesOf(await w.finish());
+  const c = centralOf(bytes)[0];
+  const dv = new DataView(bytes.buffer);
+  assert.equal(dv.getUint16(c.at + 10, true), 8, 'deflated');
+  dv.setUint32(c.at + 24, 200, true); // the header now claims 200 bytes
+  const z = await readZip(new Blob([bytes]));
+  await assert.rejects(z.entry('jobwalk.json').blob(), (e) => e.name === 'ZipError' && e.code === 'damaged' && /more than the 200 bytes/.test(e.message));
+});
+
+test('a large deflated entry (a video zipped again by Windows) unpacks whole', async () => {
+  const big = new Uint8Array(40 * 1024 * 1024);
+  for (let i = 0; i < big.length; i += 4096) big.set(randomBytes(64, i + 1), i);
+  const w = createZipWriter();
+  w.add('media/videos/001-i_v.webm', new Blob([big]), { compress: true });
+  const z = await readZip(new Blob([await w.finish()]), { verify: true });
+  const e = z.entries[0];
+  assert.equal(e.method, 8);
+  const out = await e.blob();
+  assert.equal(out.size, big.length);
+  assert.equal(await crc32Blob(out), crc32(big));
+});
+
+test('a .zip that stops being readable while an entry unpacks is not reported as a damaged entry', async () => {
+  const w = createZipWriter();
+  const data = new Uint8Array(300000);
+  for (let i = 0; i < data.length; i += 4096) data.set(randomBytes(64, i + 9), i);
+  w.add('media/photos/001-i_x.jpg', new Blob([data]), { compress: true });
+  const real = new Blob([await w.finish()]);
+  const z = await readZip(real);
+  const e = z.entries[0];
+  assert.equal(e.method, 8);
+  // The same bytes, but reading the entry's data fails the way a moved or
+  // unplugged file does (the header and the file list still read).
+  const failing = (b) => ({
+    size: b.size, type: b.type,
+    slice: (s, t, ty) => failing(b.slice(s, t, ty)),
+    arrayBuffer: () => b.arrayBuffer(),
+    stream: () => new ReadableStream({ pull(c) { c.error(new DOMException('The file could not be read.', 'NotReadableError')); } }),
+  });
+  const z2 = await readZip(failing(real));
+  await assert.rejects(z2.entries[0].blob(), (err) => err.name === 'NotReadableError');
+});
+
 test('finish can be cancelled and reports progress to the end', async () => {
   const w = createZipWriter();
   w.add('a.bin', new Blob([randomBytes(3 * 1024 * 1024, 4)]));

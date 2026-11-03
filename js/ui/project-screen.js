@@ -184,10 +184,20 @@ const copyPose = (p) => (p ? JSON.parse(JSON.stringify(p)) : null);
 // drawable itself (ImageBitmap | <img> | <canvas>) — the format the item and
 // camera screens share. Only the two most recently used plans stay cached, so
 // switching levels on a phone stays within memory; older ones are dropped
-// from the cache (not closed: another screen may still hold one).
+// from the cache (not closed: another screen may still hold one). The cache
+// Map's own order is the order of use, so the item and calibrate screens,
+// which keep their plans the same way, count too: a plan used again moves to
+// the end, and a new one drops the oldest.
 const PLAN_CACHE_KEEP = 2;
 const inflight = new Map();
-const planUsed = new Map();   // cache key → last used (ms)
+
+/** Put (or move) `key` last in `cache` and drop all but the newest PLAN_CACHE_KEEP 'plan:' entries. */
+function keepPlanCached(cache, key, image) {
+  cache.delete(key);
+  cache.set(key, image);
+  const plans = [...cache.keys()].filter((k) => typeof k === 'string' && k.startsWith('plan:'));
+  for (const k of plans.slice(0, Math.max(0, plans.length - PLAN_CACHE_KEEP))) cache.delete(k);
+}
 
 function drawable(x) {
   if (!x || typeof x !== 'object') return null;
@@ -198,8 +208,10 @@ function drawable(x) {
 
 async function planImage(cache, store, plan) {
   const key = `plan:${plan.mediaId}`;
-  const hit = drawable(cache.get(key)) || drawable(cache.get(plan.mediaId));
-  if (hit) { planUsed.set(key, Date.now()); return hit; }
+  const entry = cache.get(key);
+  if (drawable(entry)) { keepPlanCached(cache, key, entry); return drawable(entry); }   // used again: the newest now
+  const old = drawable(cache.get(plan.mediaId));
+  if (old) return old;
   if (inflight.has(key)) return inflight.get(key);
   const job = (async () => {
     const blob = await store.getMediaBlob(plan.mediaId);
@@ -210,11 +222,7 @@ async function planImage(cache, store, plan) {
     } catch {
       throw new Error('This plan is too large for this device to show. Replace it with a smaller copy or a crop (Levels & plans). Your photos are not affected.');
     }
-    cache.set(key, image);
-    planUsed.set(key, Date.now());
-    const keys = [...cache.keys()].filter((k) => typeof k === 'string' && k.startsWith('plan:'))
-      .sort((a, b) => (planUsed.get(b) || 0) - (planUsed.get(a) || 0));
-    for (const k of keys.slice(PLAN_CACHE_KEEP)) { cache.delete(k); planUsed.delete(k); }
+    keepPlanCached(cache, key, image);
     return image;
   })();
   inflight.set(key, job);

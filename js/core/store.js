@@ -21,6 +21,7 @@
 import * as db from './db.js';
 import { bus } from './bus.js';
 import { uid, todayISO } from './util.js';
+import { planToEnu } from './calibration.js';
 
 export const SCHEMA = 1;
 
@@ -200,17 +201,32 @@ export async function deleteMedia(id) {
  */
 export function createUrlScope() {
   const urls = new Map();
+  const reading = new Map();   // id → the read in progress, shared by everyone asking for it
+  let released = false;
   return {
     async url(id) {
-      if (!id) return null;
+      if (!id || released) return null;
       if (urls.has(id)) return urls.get(id);
-      const b = await getMediaBlob(id);
-      if (!b) return null;
-      const u = URL.createObjectURL(b);
-      urls.set(id, u);
-      return u;
+      if (!reading.has(id)) {
+        reading.set(id, (async () => {
+          try {
+            const b = await getMediaBlob(id);
+            // The screen closed while the file was being read: a URL made now
+            // would never be revoked, and would keep the whole file (a video
+            // can be hundreds of MB) in memory until the app is closed.
+            if (!b || released) return null;
+            const u = URL.createObjectURL(b);
+            urls.set(id, u);
+            return u;
+          } finally {
+            reading.delete(id);
+          }
+        })());
+      }
+      return reading.get(id);
     },
     release() {
+      released = true;
       for (const u of urls.values()) URL.revokeObjectURL(u);
       urls.clear();
     },
@@ -309,19 +325,43 @@ export async function restoreProject(id) {
   return updateProject(id, (p) => { p.deletedAt = null; });
 }
 
-/** Erase a job walk and every byte that belongs to it. Only from Recently Deleted. */
-export async function purgeProject(id) {
-  const itemKeys = await db.getKeysByIndex('items', 'projectId', id);
-  const mediaKeys = await db.getKeysByIndex('media', 'projectId', id);
-  await db.run(['projects', 'items', 'media', 'parts'], 'readwrite', (tx) => {
-    const items = tx.objectStore('items');
-    const media = tx.objectStore('media');
-    const parts = tx.objectStore('parts');
-    for (const k of itemKeys) items.delete(k);
-    for (const k of mediaKeys) { media.delete(k); parts.delete(db.rangeFor(k)); }
-    tx.objectStore('projects').delete(id);
+/** Thrown when what Recently Deleted showed was restored (or restored and deleted again) before the erase. */
+function keptError(what) {
+  const e = new Error(`${what} was restored in the meantime, so it was not erased.`);
+  e.kept = true;
+  return e;
+}
+
+/**
+ * Erase a job walk and every byte that belongs to it. Only from Recently
+ * Deleted, which passes the deletedAt it showed the person: the job walk is
+ * then erased only if it is still deleted from that same moment. Restored
+ * meanwhile (in another window, say), it is kept and this rejects with
+ * err.kept — the check and the deletes are one transaction, so nothing
+ * restored or captured in between is ever erased. (Without {deletedAt} —
+ * tests — it erases the job walk as it is.)
+ */
+export async function purgeProject(id, { deletedAt } = {}) {
+  const erased = await db.run(['projects', 'items', 'media', 'parts'], 'readwrite', (tx, box, fail) => {
+    const ps = tx.objectStore('projects');
+    ps.get(id).onsuccess = (e) => {
+      const p = e.target.result;
+      if (!p) return; // already erased
+      if (deletedAt !== undefined && p.deletedAt !== deletedAt) { fail(keptError(`"${p.name || 'This job walk'}"`)); return; }
+      const items = tx.objectStore('items');
+      const media = tx.objectStore('media');
+      const parts = tx.objectStore('parts');
+      items.index('projectId').getAllKeys(id).onsuccess = (e2) => {
+        for (const k of e2.target.result || []) items.delete(k);
+      };
+      media.index('projectId').getAllKeys(id).onsuccess = (e3) => {
+        for (const k of e3.target.result || []) { media.delete(k); parts.delete(db.rangeFor(k)); }
+      };
+      ps.delete(id);
+      box.value = true;
+    };
   });
-  changed('project', 'purge', id, id);
+  if (erased) changed('project', 'purge', id, id);
 }
 
 // ---- levels ---------------------------------------------------------------------------------
@@ -375,20 +415,127 @@ export async function removeLevel(projectId, levelId) {
  * plan it replaces is kept in planHistory, never erased. A new plan image
  * clears the level's calibration (it was for the old image's pixels) — the
  * old calibration is kept in the history entry too.
+ * The pins on the level were in the old image's pixels too, so in the same
+ * transaction each one is taken off the plan (retirePlanPoints) — otherwise
+ * every pin would show on the wrong room of the new sheet.
  * meta: {width, height, source, fileName, page, thumbBlob?}
  */
 export async function setLevelPlan(projectId, levelId, blob, meta) {
   const mediaId = await putMedia(blob, { kind: 'plan', projectId, name: meta.fileName || '' });
   let thumbId = null;
   if (meta.thumbBlob) thumbId = await putMedia(meta.thumbBlob, { kind: 'planThumb', projectId });
-  return updateLevel(projectId, levelId, (l) => {
-    if (l.plan) l.planHistory = [...(l.planHistory || []), { ...l.plan, calibration: l.calibration, replacedAt: Date.now() }];
-    l.plan = {
-      mediaId, thumbId, width: meta.width, height: meta.height,
-      source: meta.source || 'image', fileName: meta.fileName || '', page: meta.page ?? null, addedAt: Date.now(),
+  const now = Date.now();
+  const retired = [];
+  const p = await db.run(['projects', 'items'], 'readwrite', (tx, box, fail) => {
+    const ps = tx.objectStore('projects');
+    ps.get(projectId).onsuccess = (e) => {
+      const cur = e.target.result;
+      if (!cur) { fail(new Error('That job walk no longer exists on this phone.')); return; }
+      const l = getLevel(cur, levelId);
+      if (!l) { fail(new Error('That level no longer exists.')); return; }
+      // No plan now can still mean pins in an old image's pixels: an import
+      // whose plan image did not come through keeps that plan (and its
+      // calibration) only in planHistory, and leaves the pins as they were.
+      const hist = l.planHistory || [];
+      const gone = !l.plan && hist.length ? hist[hist.length - 1] : null;
+      const oldPlan = l.plan || gone;
+      const oldCal = l.plan ? l.calibration : (gone?.calibration ?? null);
+      if (l.plan) l.planHistory = [...(l.planHistory || []), { ...l.plan, calibration: l.calibration, replacedAt: now }];
+      l.plan = {
+        mediaId, thumbId, width: meta.width, height: meta.height,
+        source: meta.source || 'image', fileName: meta.fileName || '', page: meta.page ?? null, addedAt: now,
+      };
+      l.calibration = null;
+      cur.updatedAt = now;
+      cur.changeSeq = (cur.changeSeq || 0) + 1;
+      ps.put(cur);
+      box.value = cur;
+      if (!oldPlan) return; // a first plan: nothing was placed in any image's pixels yet
+      const is = tx.objectStore('items');
+      is.index('projectId').getAll(projectId).onsuccess = (e2) => {
+        for (const it of e2.target.result || []) {
+          if (it.levelId !== levelId) continue;
+          try {
+            if (!retirePlanPoints(it, oldPlan, oldCal, now)) continue;
+          } catch (err) {
+            console.warn('[store] a pin could not be taken off the old plan', it.id, err);
+            continue;
+          }
+          it.updatedAt = now;
+          is.put(it);
+          retired.push(it.id);
+        }
+      };
     };
-    l.calibration = null;
   });
+  changed('project', 'update', projectId, projectId);
+  for (const id of retired) changed('item', 'update', id, projectId);
+  return p;
+}
+
+const finiteXY = (pt) => !!pt && Number.isFinite(pt.x) && Number.isFinite(pt.y);
+
+/**
+ * An item's spots in the pixels of a plan image that is being replaced.
+ * They are moved into pose.planPrev ({mediaId: the old image, x, y, planAcc,
+ * planHeading, planLocked, planAuto?, enu?, track?: [{t, x, y, planHeading}],
+ * at, before?: the planPrev of a plan replaced earlier}; item.planPrev for
+ * an item with no pose) — kept, never dropped — and cleared from pose.plan
+ * and the video track, so nothing is drawn at an old spot on the new image.
+ * A pin placed by hand on a CALIBRATED old plan first becomes a ground
+ * position (pose.enu; the one it had is kept in planPrev.enu), so the new
+ * plan's calibration puts it back where the person placed it. Every other
+ * item is placed again from its GPS position when the new plan is
+ * calibrated (planLocked is cleared so that can happen).
+ * Changes `item` in place; true when anything changed.
+ */
+export function retirePlanPoints(item, oldPlan, oldCal, now = Date.now()) {
+  const pose = item?.pose && typeof item.pose === 'object' ? item.pose : null;
+  const prev = { mediaId: oldPlan?.mediaId ?? null, at: now };
+  // Only a calibration made for that same image turns its pixels into ground positions.
+  const cal = oldCal && (!oldCal.planMediaId || oldCal.planMediaId === oldPlan?.mediaId) ? oldCal : null;
+  let moved = false;
+  if (pose && finiteXY(pose.plan)) {
+    Object.assign(prev, {
+      x: pose.plan.x, y: pose.plan.y, planAcc: pose.planAcc ?? null,
+      planHeading: pose.planHeading ?? null, planLocked: pose.planLocked === true,
+    });
+    if (pose.planLocked === true) {
+      const g = planToEnu(cal, pose.plan);
+      if (g && Number.isFinite(g.e) && Number.isFinite(g.n)) {
+        prev.enu = pose.enu ?? null;
+        pose.enu = { e: g.e, n: g.n };
+      }
+    }
+    pose.plan = null;
+    pose.planAcc = null;
+    pose.planHeading = null;
+    pose.planLocked = false;
+    moved = true;
+  }
+  if (pose && 'planAuto' in pose) {
+    // The measured spot a pin check replaced: old-image pixels as well.
+    prev.planAuto = pose.planAuto;
+    delete pose.planAuto;
+    moved = true;
+  }
+  if (Array.isArray(item?.track)) {
+    const old = [];
+    for (const pt of item.track) {
+      if (!pt || typeof pt !== 'object' || !(Number.isFinite(pt.x) || Number.isFinite(pt.y))) continue;
+      old.push({ t: pt.t ?? null, x: pt.x ?? null, y: pt.y ?? null, planHeading: pt.planHeading ?? null });
+      pt.x = null;
+      pt.y = null;
+      pt.planHeading = null;
+    }
+    if (old.length) { prev.track = old; moved = true; }
+  }
+  if (!moved) return false;
+  // A plan replaced before: its spots are kept too, inside this one.
+  const keep = pose || item;
+  if (keep.planPrev) prev.before = keep.planPrev;
+  keep.planPrev = prev;
+  return true;
 }
 
 export async function setCalibration(projectId, levelId, calibration) {
@@ -496,23 +643,37 @@ export async function restoreItem(id) {
   return updateItem(id, (i) => { i.deletedAt = null; });
 }
 
-/** Erase an item and its bytes. Only from Recently Deleted. */
-export async function purgeItem(id) {
-  const item = await db.get('items', id);
-  if (!item) return;
-  const mediaKeys = await db.getKeysByIndex('media', 'itemId', id);
-  await db.run(['items', 'media', 'parts', 'projects'], 'readwrite', (tx) => {
-    const media = tx.objectStore('media');
-    const parts = tx.objectStore('parts');
-    for (const k of mediaKeys) { media.delete(k); parts.delete(db.rangeFor(k)); }
-    tx.objectStore('items').delete(id);
-    const ps = tx.objectStore('projects');
-    ps.get(item.projectId).onsuccess = (e) => {
-      const p = e.target.result;
-      if (p) { p.changeSeq = (p.changeSeq || 0) + 1; ps.put(p); }
+/**
+ * Erase an item and its bytes. Only from Recently Deleted: an item that is
+ * not deleted (restored meanwhile) is kept and this rejects with err.kept;
+ * with {deletedAt} (what Recently Deleted showed) so is one restored and
+ * deleted again since. Checked in the same transaction as the deletes.
+ */
+export async function purgeItem(id, { deletedAt } = {}) {
+  const item = await db.run(['items', 'media', 'parts', 'projects'], 'readwrite', (tx, box, fail) => {
+    const is = tx.objectStore('items');
+    is.get(id).onsuccess = (e) => {
+      const cur = e.target.result;
+      if (!cur) return; // already erased
+      if (!cur.deletedAt || (deletedAt !== undefined && cur.deletedAt !== deletedAt)) {
+        fail(keptError(`This ${cur.type === 'video' ? 'video' : cur.type === 'note' ? 'note' : 'photo'}`));
+        return;
+      }
+      const media = tx.objectStore('media');
+      const parts = tx.objectStore('parts');
+      media.index('itemId').getAllKeys(id).onsuccess = (e2) => {
+        for (const k of e2.target.result || []) { media.delete(k); parts.delete(db.rangeFor(k)); }
+      };
+      is.delete(id);
+      const ps = tx.objectStore('projects');
+      ps.get(cur.projectId).onsuccess = (e3) => {
+        const p = e3.target.result;
+        if (p) { p.changeSeq = (p.changeSeq || 0) + 1; ps.put(p); }
+      };
+      box.value = cur;
     };
   });
-  changed('item', 'purge', id, item.projectId);
+  if (item) changed('item', 'purge', id, item.projectId);
 }
 
 /** Everything in Recently Deleted: whole job walks, and items deleted from job walks that still exist. */
@@ -620,6 +781,35 @@ export async function putMediaWithId(id, blob, { kind, projectId, itemId = null,
   return putMedia(blob, { id, kind, projectId, itemId, name, meta });
 }
 
+// An import writes every file first and its job walk record last, so for a
+// long import (GB of video) its first files are older than RECOVER_AFTER_MS
+// while their job walk does not exist yet. Another window of the app
+// starting then must not take them for leftovers of an import that died.
+const IMPORT_LOCK = 'jw-import';
+
+/**
+ * Run `fn` (a whole package import) holding the 'jw-import' Web Lock —
+ * shared, so two imports can run at once. While any window holds it,
+ * recoverOrphans leaves media of job walks that do not exist yet alone.
+ * The browser lets go of the lock when the page dies, so the leftovers of
+ * an import that was killed are still cleaned up at a later start.
+ */
+export async function withImportLock(fn) {
+  const locks = globalThis.navigator?.locks;
+  if (!locks?.request) return fn();
+  return locks.request(IMPORT_LOCK, { mode: 'shared' }, () => fn());
+}
+
+/** Whether an import is running in any window of the app (false when the browser cannot tell). */
+async function importRunning() {
+  try {
+    const q = await globalThis.navigator?.locks?.query?.();
+    return [...(q?.held || []), ...(q?.pending || [])].some((l) => l?.name === IMPORT_LOCK);
+  } catch {
+    return false;
+  }
+}
+
 // ---- recovery --------------------------------------------------------------------------------
 //
 // Run once at start (main.js), after videos are recovered:
@@ -629,16 +819,21 @@ export async function putMediaWithId(id, blob, { kind, projectId, itemId = null,
 //  - a photo or video whose bytes were saved but whose item was never
 //    written (the app died in between) becomes a "Recovered" item, using
 //    the facts saved with its bytes (meta), so it shows up again.
+// While an import runs in any window (withImportLock), nothing is removed.
 
 const RECOVER_AFTER_MS = 10 * 60 * 1000;
 
 export async function recoverOrphans({ now = Date.now() } = {}) {
   const out = { partsRemoved: 0, items: [] };
+  // Asked first: an import that starts after this only writes files younger
+  // than RECOVER_AFTER_MS, which are left alone anyway.
+  const importing = await importRunning();
   const media = await db.getAll('media');
   const known = new Set(media.map((m) => m.id));
   const partKeys = await db.getAllKeys('parts');
   const strays = [...new Set(partKeys.filter((k) => !known.has(k[0])).map((k) => k[0]))];
   for (const mediaId of strays) {
+    if (importing) break; // a big file of the import may still be being written, part by part
     const first = await db.get('parts', [mediaId, 0]);
     if (first && now - (first.at || 0) < RECOVER_AFTER_MS) continue;
     await deleteParts(mediaId);
@@ -656,9 +851,10 @@ export async function recoverOrphans({ now = Date.now() } = {}) {
   }
   const projects = new Map((await db.getAll('projects')).map((p) => [p.id, p]));
   // Bytes of a job walk that was never created (an import the phone killed
-  // midway): nothing can point at them, and the .zip still has them.
+  // midway): nothing can point at them, and the .zip still has them. Not
+  // while an import runs in some window: its job walk is written last.
   out.mediaRemoved = 0;
-  for (const m of media) {
+  for (const m of importing ? [] : media) {
     if (projects.has(m.projectId) || now - (m.createdAt || 0) < RECOVER_AFTER_MS) continue;
     await deleteMedia(m.id);
     out.mediaRemoved++;

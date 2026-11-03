@@ -233,10 +233,12 @@ export async function open(ctx) {
     if (!ok) return;
     working = true;
     try {
-      await store.purgeItem(item.id);
+      // With the deletedAt shown: restored meanwhile (another window), it is kept.
+      await store.purgeItem(item.id, { deletedAt: item.deletedAt });
       toast(`${itemLabel(item)} was erased.`, { type: 'ok' });
     } catch (err) {
-      toast(`It was not erased: ${err.message}`, { type: 'err' });
+      if (err.kept) toast(err.message, { type: 'info' });
+      else toast(`It was not erased: ${err.message}`, { type: 'err' });
     } finally {
       working = false;
     }
@@ -254,10 +256,11 @@ export async function open(ctx) {
     working = true;
     const b = busy(`Erasing ${p.name}…`);
     try {
-      await store.purgeProject(p.id);
+      await store.purgeProject(p.id, { deletedAt: p.deletedAt });
       toast(`"${p.name}" was erased.`, { type: 'ok' });
     } catch (err) {
-      toast(`It was not erased: ${err.message}`, { type: 'err' });
+      if (err.kept) toast(err.message, { type: 'info' });
+      else toast(`It was not erased: ${err.message}`, { type: 'err' });
     } finally {
       b.done();
       working = false;
@@ -277,21 +280,34 @@ export async function open(ctx) {
     });
     if (!ok) return;
     working = true;
-    const total = projects.length + items.length;
+    const confirmed = projects.length + items.length;
+    let total = confirmed;
     let n = 0;
     const b = busy('Erasing…');
+    // One the store refuses because it was restored a moment ago (err.kept) is skipped, not an error.
+    const erase = async (purge) => {
+      try { await purge(); n++; } catch (err) { if (!err.kept) throw err; }
+    };
     try {
-      for (const it of items) {
+      // The list shown can be a moment old (it is redrawn shortly after a
+      // Restore, and another window may restore something): erase only what
+      // was confirmed AND is still in Recently Deleted from the same moment.
+      const fresh = await store.listTrash();
+      const stillItems = new Map(fresh.items.map((i) => [i.id, i.deletedAt]));
+      const stillProjects = new Map(fresh.projects.map((p) => [p.id, p.deletedAt]));
+      const todoItems = items.filter((it) => stillItems.get(it.id) === it.deletedAt);
+      const todoProjects = projects.filter(({ p }) => stillProjects.get(p.id) === p.deletedAt);
+      total = todoItems.length + todoProjects.length;
+      for (const it of todoItems) {
         b.update(`Erasing ${itemLabel(it)}…`, n / total);
-        await store.purgeItem(it.id);
-        n++;
+        await erase(() => store.purgeItem(it.id, { deletedAt: it.deletedAt }));
       }
-      for (const { p } of projects) {
+      for (const { p } of todoProjects) {
         b.update(`Erasing ${p.name}…`, n / total);
-        await store.purgeProject(p.id);
-        n++;
+        await erase(() => store.purgeProject(p.id, { deletedAt: p.deletedAt }));
       }
-      toast('Recently Deleted is empty.', { type: 'ok' });
+      if (n < confirmed) toast(`Erased ${n} of ${confirmed}. The rest was restored in the meantime, so it was kept.`, { type: 'ok' });
+      else toast('Recently Deleted is empty.', { type: 'ok' });
     } catch (err) {
       toast(`Stopped after ${n} of ${total}: ${err.message}`, { type: 'err' });
     } finally {

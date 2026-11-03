@@ -198,7 +198,18 @@ test('when the bytes cannot be saved, nothing is created and the photo is handed
   assert.equal(err.blob, blob);
   assert.equal(err.stage, 'original');
   assert.equal(created, 0);
+  assert.equal(capture.isStorageFull(err), true, 'the camera can tell the phone is full');
   await assert.rejects(capture.savePhoto({ project: p, blob: new Blob([]) }), /empty/);
+});
+
+test('isStorageFull: a full phone, also wrapped as the cause; other failures are not', () => {
+  const quota = Object.assign(new Error('out of space'), { name: 'QuotaExceededError' });
+  assert.equal(capture.isStorageFull(quota), true);
+  assert.equal(capture.isStorageFull(Object.assign(new Error('The photo was NOT saved'), { cause: quota })), true);
+  assert.equal(capture.isStorageFull(new Error('The phone closed the app\'s storage')), false);
+  assert.equal(capture.isStorageFull(Object.assign(new Error('x'), { cause: new Error('y') })), false);
+  assert.equal(capture.isStorageFull(null), false);
+  assert.equal(capture.isStorageFull('QuotaExceededError'), false);
 });
 
 test('a photo larger than the size setting is shrunk; if shrinking fails the full photo is kept', async () => {

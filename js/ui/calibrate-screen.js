@@ -179,6 +179,8 @@ function button(label, { ic, cls = 'btn', onclick, disabled = false, title } = {
 }
 
 const actions = (...btns) => el('div', { class: 'cal-actions' }, ...btns.filter(Boolean));
+/** An actions row that stays in view at the foot of the panel; only as a step's last row. */
+const dock = (...btns) => el('div', { class: 'cal-actions cal-dock' }, ...btns.filter(Boolean));
 
 function banner(level, title, text, extra = null) {
   const ic = level === 'ok' ? 'check' : level === 'info' ? 'info' : 'warning';
@@ -324,18 +326,36 @@ async function decodePlan(blob) {
   return img;
 }
 
+// A decoded plan is up to ~64 MB, so only the two most recently used stay in
+// app.cache, the same rule as the project and item screens. The cache Map's
+// own order is the order of use, so the screens agree on it: a plan used
+// again moves to the end, and keeping a new one drops the oldest (dropped,
+// not closed: a screen still showing it keeps its own reference).
+const PLAN_CACHE_KEEP = 2;
+
+function keepPlanCached(cache, key, image) {
+  if (!cache) return;
+  cache.delete(key);
+  cache.set(key, image);
+  const plans = [...cache.keys()].filter((k) => typeof k === 'string' && k.startsWith('plan:'));
+  for (const k of plans.slice(0, Math.max(0, plans.length - PLAN_CACHE_KEEP))) cache.delete(k);
+}
+
 /** The decoded plan image, shared with the other screens through app.cache under 'plan:<mediaId>'. */
 async function loadPlanImage(C) {
   const id = C.level.plan.mediaId;
   const key = `plan:${id}`;
   const cached = C.app.cache?.get(key);
-  if (isDrawable(cached)) return (C.planImage = cached);
+  if (isDrawable(cached)) {
+    keepPlanCached(C.app.cache, key, cached);   // used again: the newest now
+    return (C.planImage = cached);
+  }
   const blob = await C.store.getMediaBlob(id);
   if (!blob) {
     throw new Error('The plan image for this level could not be read from this phone. Add the plan again from Levels & plans — your photos and notes are not affected.');
   }
   const img = await decodePlan(blob);
-  C.app.cache?.set(key, img);
+  keepPlanCached(C.app.cache, key, img);
   return (C.planImage = img);
 }
 
@@ -1166,13 +1186,16 @@ async function gpsMode(C) {
         hint.textContent = walkHint(i);
         hint.hidden = !hint.textContent;
       };
+      // Set location comes before the how-to text: on a small phone in a
+      // Safari tab, with the 'Waiting for GPS…' banner showing, the text
+      // pushed it below the bottom of the panel.
       return [
         el('h2', { class: 'cal-h' }, `Walk to point ${i + 1} and stand on it`),
-        el('p', {}, 'Stand right on the spot with the screen on. Hold the phone at chest height and keep still while it measures — about half a minute.'),
         hint,
         problem,
         st.notice ? banner(st.notice.level, '', st.notice.text) : null,
         actions(set),
+        el('p', {}, 'Stand right on the spot with the screen on. Hold the phone at chest height and keep still while it measures — about half a minute.'),
         actions(
           button('Move the mark', { ic: 'crosshair', cls: 'btn btn-outline', onclick: () => pick(i) }),
           st.backup?.index === i ? button('Cancel redo', { cls: 'btn btn-ghost', onclick: cancelRedo }) : null),
@@ -1203,7 +1226,9 @@ async function gpsMode(C) {
         meter,
         hint,
         tip('Keep the screen on and this app open — phones stop GPS for apps in the background.'),
-        actions(button('Cancel', { cls: 'btn btn-outline', onclick: () => cancelSampling(s) }), done),
+        // Docked to the foot of the panel (css/calibrate.css): on a small
+        // phone the stats push Cancel and Done below its bottom.
+        dock(button('Cancel', { cls: 'btn btn-outline', onclick: () => cancelSampling(s) }), done),
       ];
     },
 

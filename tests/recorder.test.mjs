@@ -490,3 +490,21 @@ test('recovery: an ordinary failure gives the try back (only crashes count)', as
   const items = await rec.recoverRecordings({ deps: recDeps });
   assert.ok(items.some((i) => i.projectId === p.id));
 });
+
+test('recovery: a launch that fails still says how many videos wait for "Try again"; force rebuilds them', async () => {
+  const { p, level } = await newProject('Skipped and failing');
+  const crashed = await leftover(p, level, [0], { recoveryTries: rec.MAX_RECOVERY_TRIES });
+  const failing = await leftover(p, level, [0, 1]);
+  const mine = new Set([crashed.recId, failing.recId]);
+  const onlyMine = async () => (await store.listRecordings()).filter((x) => mine.has(x.recId));
+  const full = { ...store, listRecordings: onlyMine, putMedia: () => Promise.reject(new Error('The phone is out of storage space')) };
+  const err = await rec.recoverRecordings({ deps: { ...recDeps, store: full } }).then(() => null, (e) => e);
+  assert.ok(err, 'nothing rebuilt and something failed: rejects');
+  assert.equal(err.skipped, 1, 'the skipped video is still counted');
+  assert.equal(err.errors.length, 1);
+  assert.equal((await chunkRows(crashed.recId)).length, 1, 'pieces kept');
+  // "Try again" (force) once there is room: both are rebuilt.
+  const items = await rec.recoverRecordings({ force: true, deps: { ...recDeps, store: { ...store, listRecordings: onlyMine } } });
+  assert.equal(items.filter((i) => i.projectId === p.id).length, 2);
+  assert.equal(items.skipped, 0);
+});

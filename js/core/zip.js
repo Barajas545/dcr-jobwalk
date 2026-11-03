@@ -346,6 +346,13 @@ function timeExtra(mtime) {
  * Only the end of the file and the central directory are read here; each
  * entry's bytes are read when asked for. `verify` (default for every entry)
  * checks the CRC-32 of what is read and rejects on a mismatch.
+ * Errors are named 'ZipError' and carry a `code`: 'damaged' (the bytes are
+ * wrong or cut short), or 'encrypted' / 'unsupported' (the file may be fine,
+ * but this app cannot unpack it), so a caller can skip one damaged file and
+ * still refuse a zip it cannot read at all.
+ * Names are given with forward slashes even when the tool that made the zip
+ * wrote backslashes (Windows PowerShell's Compress-Archive does), as the zip
+ * format requires.
  */
 export async function readZip(blob, { verify = false } = {}) {
   if (!blob || typeof blob.slice !== 'function' || typeof blob.size !== 'number') throw new TypeError('readZip needs a File or Blob');
@@ -444,7 +451,9 @@ export async function readZip(blob, { verify = false } = {}) {
     if (ut && ut.length >= 5 && (ut[0] & 1)) when = new Date(viewOf(ut).getUint32(1, true) * 1000);
     if (!when) when = fromDosDateTime(date, time);
 
-    const name = decodeName(nameBytes, flags, extras.get(EXTRA_UNICODE_PATH));
+    // Backslashes are not allowed as separators (APPNOTE 4.4.17), but some
+    // Windows tools write them; left alone, no file would be found by its path.
+    const name = decodeName(nameBytes, flags, extras.get(EXTRA_UNICODE_PATH)).replace(/\\/g, '/');
     const isDirectory = name.endsWith('/') || (extAttr & 0x10) !== 0;
     entries.push(makeEntry(blob, {
       name, size: usize, compressedSize: csize, method, crc32: crc, date: when, isDirectory,
@@ -465,7 +474,7 @@ function makeEntry(zip, info, verifyDefault) {
     ...info,
     async blob({ verify = verifyDefault, type, signal, onProgress } = {}) {
       throwIfAborted(signal);
-      if (info.encrypted) throw zipError(`"${info.name}" is password-protected. Unzip it on a computer and zip it again without a password.`);
+      if (info.encrypted) throw zipError(`"${info.name}" is password-protected. Unzip it on a computer and zip it again without a password.`, 'encrypted');
       if (info.isDirectory) return new Blob([], { type: type || '' });
       if (dataStart == null) {
         const h = await bytesAt(zip, info.offset, 30);
@@ -479,9 +488,9 @@ function makeEntry(zip, info, verifyDefault) {
       if (info.method === 0) {
         out = zip.slice(dataStart, dataStart + info.compressedSize, mime);
       } else if (info.method === 8) {
-        out = await inflate(zip.slice(dataStart, dataStart + info.compressedSize), mime, signal, info.name);
+        out = await inflate(zip.slice(dataStart, dataStart + info.compressedSize), mime, signal, info.name, info.size);
       } else {
-        throw zipError(`"${info.name}" uses a kind of compression this app cannot read (method ${info.method}). Unzip it on a computer and zip it again.`);
+        throw zipError(`"${info.name}" uses a kind of compression this app cannot read (method ${info.method}). Unzip it on a computer and zip it again.`, 'unsupported');
       }
       if (out.size !== info.size) throw zipError(`"${info.name}" in this .zip is damaged (${out.size} of ${info.size} bytes).`);
       if (verify) {
@@ -609,21 +618,47 @@ async function eachChunk(blob, fn, signal) {
   if (read !== blob.size) throw new Error(`A file could not be read completely (${read} of ${blob.size} bytes).`);
 }
 
-async function collect(stream, type, signal) {
+const FLUSH_BYTES = 16 * 1024 * 1024; // unpacked bytes held as JS arrays before they are handed to a Blob
+const TOO_BIG = 'ZipTooBig';
+
+/**
+ * A stream's bytes as one Blob. Every FLUSH_BYTES the chunks so far become a
+ * Blob of their own, so unpacking a re-zipped 1 GB video never holds it in
+ * the page's memory as arrays. More than `limit` bytes stops it at once (a
+ * damaged or hostile file must not fill the phone's memory before the size
+ * check after it).
+ */
+async function collect(stream, type, signal, limit = Infinity) {
   const reader = stream.getReader();
-  const chunks = [];
+  const parts = [];
+  let chunks = [];
+  let held = 0;
+  let total = 0;
   try {
     for (;;) {
       throwIfAborted(signal);
       const { done, value } = await reader.read();
       if (done) break;
+      total += value.length;
+      if (total > limit) {
+        const e = new Error(`More than ${limit} bytes`);
+        e.name = TOO_BIG;
+        throw e;
+      }
       chunks.push(value);
+      held += value.length;
+      if (held >= FLUSH_BYTES) {
+        parts.push(new Blob(chunks));
+        chunks = [];
+        held = 0;
+      }
     }
   } catch (err) {
     try { await reader.cancel(); } catch { /* already closed */ }
     throw err;
   }
-  return new Blob(chunks, { type: type || '' });
+  if (chunks.length) parts.push(new Blob(chunks));
+  return new Blob(parts, { type: type || '' });
 }
 
 async function deflate(data, signal) {
@@ -631,14 +666,19 @@ async function deflate(data, signal) {
   return collect(blob.stream().pipeThrough(new CompressionStream('deflate-raw')), '', signal);
 }
 
-async function inflate(blob, type, signal, name) {
+/** Unpack a deflated entry; `size` is what its header says it unpacks to. */
+async function inflate(blob, type, signal, name, size = Infinity) {
   if (typeof DecompressionStream === 'undefined') {
-    throw zipError('This browser cannot unpack compressed .zip files. Update the browser, or use the .zip exactly as DCR Job Walk made it.');
+    throw zipError('This browser cannot unpack compressed .zip files. Update the browser, or use the .zip exactly as DCR Job Walk made it.', 'unsupported');
   }
   try {
-    return await collect(blob.stream().pipeThrough(new DecompressionStream('deflate-raw')), type, signal);
+    return await collect(blob.stream().pipeThrough(new DecompressionStream('deflate-raw')), type, signal, size);
   } catch (err) {
     if (err?.name === 'AbortError') throw err;
+    // The .zip itself could not be read (moved, unplugged, synced away): not
+    // this entry's bytes being wrong, so it must not be skipped as damaged.
+    if (err?.name === 'NotReadableError' || err?.name === 'NotFoundError') throw err;
+    if (err?.name === TOO_BIG) throw zipError(`"${name}" in this .zip is damaged (it unpacks to more than the ${size} bytes it should).`);
     throw zipError(`"${name}" in this .zip is damaged (it cannot be unpacked).`);
   }
 }
@@ -694,8 +734,9 @@ function throwIfAborted(signal) {
   if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException('Cancelled', 'AbortError');
 }
 
-function zipError(message) {
+function zipError(message, code = 'damaged') {
   const e = new Error(message);
   e.name = 'ZipError';
+  e.code = code;
   return e;
 }

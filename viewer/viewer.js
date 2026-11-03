@@ -166,11 +166,16 @@
     return null;
   }
 
-  /** Camera direction on the plan, degrees clockwise from plan up. */
+  /**
+   * Camera direction on the plan, degrees clockwise from plan up. Without a
+   * stored one it comes from the true heading the app's way
+   * (calibration.headingToPlan): northAngle is where true north points on the
+   * plan, so a camera facing north faces northAngle — heading + northAngle.
+   */
   function planHeadingOf(pose, level) {
     if (!pose) return null;
     if (isNum(pose.planHeading)) return pose.planHeading;
-    if (isNum(pose.heading) && level && isNum(level.northAngle)) return normDeg(pose.heading - level.northAngle);
+    if (isNum(pose.heading) && level && isNum(level.northAngle)) return normDeg(pose.heading + level.northAngle);
     return null;
   }
 
@@ -180,7 +185,7 @@
     for (const p of item.track || []) {
       if (!p || !isNum(p.x) || !isNum(p.y)) continue;
       let hd = isNum(p.planHeading) ? p.planHeading : null;
-      if (hd == null && isNum(p.heading) && level && isNum(level.northAngle)) hd = normDeg(p.heading - level.northAngle);
+      if (hd == null && isNum(p.heading) && level && isNum(level.northAngle)) hd = normDeg(p.heading + level.northAngle);
       out.push({ t: isNum(p.t) ? p.t : 0, x: p.x, y: p.y, h: hd });
     }
     return out;

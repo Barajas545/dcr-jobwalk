@@ -14,6 +14,7 @@
 //   media/videos/<seq>-<itemId>.<webm|mp4>
 //   media/voice/<voiceId>.<webm|m4a|ogg>
 //   media/other/<mediaId>.<ext>              bytes no record points at any more (kept: a backup is complete)
+//   media/recordings/<recId>/<seq>.<ext>     pieces of a video the app has not finished saving
 //   README.txt
 //
 // Why it is built this way:
@@ -33,6 +34,7 @@
 //    to Recently Deleted only after the new one is completely saved.
 
 import * as store from './store.js';
+import * as db from './db.js';
 import { getSettings } from './settings.js';
 import { uid, safeFileName, todayISO, formatAccuracy, formatDateTime, formatBytes, compassPoint, normDeg } from './util.js';
 import { APP_VERSION } from '../version.js';
@@ -119,6 +121,47 @@ async function snapshot(projectId) {
     deleted: all.filter((i) => i.deletedAt).sort(bySeq),
     records,
   };
+}
+
+// Videos still in pieces (js/core/recorder.js): the app was closed while
+// filming and the video could not be rebuilt yet (rebuilding a long one can
+// run a phone out of memory), or pieces were kept after a gap. Those pieces
+// are the only copy, so a backup carries them as they are —
+// media/recordings/<recId>/<seq>.<ext>, with the recording row in
+// jobwalk.json `recordings` — and an import puts them back, for the app to
+// rebuild the next time it starts.
+
+const RECORDING_READ_BATCH = 16; // pieces read per transaction (~16 s of video), as recorder.js does
+
+/** The recordings of a job walk whose pieces are not just a saved video waiting to be tidied up. */
+async function unsavedRecordings(projectId) {
+  const out = [];
+  for (const row of await store.listRecordings()) {
+    if (!row?.recId || row.projectId !== projectId) continue;
+    // Saved as a video item already; the next start only removes the pieces.
+    if (row.itemId && !row.recoveredPrefix && (await store.getItem(row.itemId))) continue;
+    out.push(row);
+  }
+  return out;
+}
+
+/** A recording's pieces as Blobs, [{seq, blob}] in order — read a few at a time, so a long video is never in memory twice. */
+async function recordingPieces(recId) {
+  const seqs = await store.getRecordingChunkSeqs(recId);
+  const out = [];
+  if (typeof IDBKeyRange === 'undefined') {
+    for (const b of await store.getRecordingChunks(recId)) if (b.size) out.push({ seq: b.seq, blob: b });
+    return out;
+  }
+  for (let i = 0; i < seqs.length; i += RECORDING_READ_BATCH) {
+    const lo = seqs[i];
+    const hi = seqs[Math.min(seqs.length, i + RECORDING_READ_BATCH) - 1];
+    for (const r of await db.getAll('chunks', IDBKeyRange.bound([recId, lo], [recId, hi]))) {
+      const bytes = r.data ?? r.blob;
+      if (bytes && (r.size ?? bytes.byteLength ?? bytes.size)) out.push({ seq: r.seq, blob: new Blob([bytes], { type: r.type || '' }) });
+    }
+  }
+  return out.sort((a, b) => a.seq - b.seq);
 }
 
 /**
@@ -214,8 +257,10 @@ export function layoutFiles({ project, live, deleted, records }, { includeVideos
 /**
  * What a backup of this job walk holds, and roughly how big it is — for the
  * export screen, before anything is read.
- * → {counts: {photos, videos, notes, voice, plans, deleted}, bytes: {total,
- *    videos, withoutVideos, photos}, stamp}
+ * → {counts: {photos, videos, notes, voice, plans, deleted, unsavedVideos},
+ *    bytes: {total, videos, withoutVideos, photos}, stamp}
+ * unsavedVideos: videos still in pieces (see unsavedRecordings); they count
+ * as videos for "Include videos" and the sizes.
  */
 export async function estimateExport(projectId) {
   const snap = await snapshot(projectId);
@@ -228,6 +273,14 @@ export async function estimateExport(projectId) {
     total += f.size;
     if (f.role === 'video' || (f.role === 'other' && f.kind === 'video')) videos += f.size;
     if (f.role === 'original' || f.role === 'annotated') photos += f.size;
+  }
+  // Pieces are not read here: one a second, at the bit rate it was filmed at.
+  const recordings = await unsavedRecordings(projectId);
+  for (const r of recordings) {
+    const n = (await store.getRecordingChunkSeqs(r.recId)).length;
+    const bytes = Math.round(n * (Number(r.videoBitsPerSecond) || 6_000_000) / 8);
+    total += bytes;
+    videos += bytes;
   }
   const livePhotos = snap.live.filter((i) => i.type === 'photo');
   const stamp = !!settings.stampExports;
@@ -243,6 +296,7 @@ export async function estimateExport(projectId) {
       plans: (snap.project.levels || []).filter((l) => l.plan).length,
       levels: (snap.project.levels || []).length,
       deleted: snap.deleted.length,
+      unsavedVideos: recordings.length,
     },
     bytes: {
       total: total + stampBytes + overhead,
@@ -524,7 +578,7 @@ export function buildViewerData({ project, items, pathOf, viewerPath = new Map()
   };
 }
 
-function readmeText({ project, settings, exportedAt, counts, complete, omitted, hasViewer }) {
+function readmeText({ project, settings, exportedAt, counts, complete, omitted, hasViewer, hasRecordings = false }) {
   const lines = [
     `DCR Job Walk — ${project.name || 'Job walk'}`,
     [project.address, project.gc && `GC: ${project.gc}`, project.number && `DCR job # ${project.number}`, project.walkDate && `Walk date: ${project.walkDate}`].filter(Boolean).join(' · '),
@@ -569,6 +623,10 @@ function readmeText({ project, settings, exportedAt, counts, complete, omitted, 
     'media/videos/              the videos',
     'media/voice/               the voice notes',
     'media/other/               files kept for completeness (for example removed voice notes)',
+    ...(hasRecordings ? [
+      'media/recordings/          the recorded pieces of a video the app had not finished saving, in order.',
+      '                           Import the .zip into DCR Job Walk and it rebuilds the video.',
+    ] : []),
     '',
     'Items in Recently Deleted on the phone are in jobwalk.json ("deletedItems") and their files are',
     'in the folders above, so restoring this backup loses nothing. The viewer does not show them.',
@@ -583,6 +641,9 @@ function readmeText({ project, settings, exportedAt, counts, complete, omitted, 
  * → {blob, fileName, changeSeq, size, counts, warnings, complete, missingFiles}
  * complete: false when something was left out on purpose (includeVideos /
  * includeOriginals false) — a shared copy, which should not count as a backup.
+ * Videos still in pieces are in it as pieces (manifest `recordings`); files
+ * the phone could only partly read are in it as read, listed in `damaged`
+ * and named in `warnings`.
  * changeSeq is the project's change count when the export STARTED: pass it
  * to store.markBackedUp once the file has been saved or shared.
  * onProgress({phase: 'prepare'|'stamp'|'zip', message, fraction}).
@@ -601,11 +662,20 @@ export async function exportProject(projectId, { includeVideos = true, includeOr
   const layout = layoutFiles(snap, { includeVideos, includeOriginals });
   const { files, byMedia, omitted } = layout;
   const missing = [...layout.missing];
+  const damaged = [];
 
   // Blob handles (not bytes) for every file.
   for (const f of files) {
     const blob = await store.getMediaBlob(f.id);
     if (blob && blob.size) {
+      // Shorter (or longer) than when it was saved: a part of it is gone
+      // from the phone. What is left still goes in — better than nothing —
+      // but it is named, not passed off as whole (the check-sum in the zip
+      // would make it import as if it were).
+      const want = snap.records.get(f.id)?.size;
+      if (Number.isFinite(want) && want > 0 && blob.size !== want) {
+        damaged.push({ id: f.id, role: f.role, itemId: f.itemId, levelId: f.levelId, path: f.path, size: blob.size, expectedSize: want });
+      }
       f.blob = blob;
       f.size = blob.size;
       if (!f.type) f.type = blob.type || mimeFromName(f.path);
@@ -614,6 +684,25 @@ export async function exportProject(projectId, { includeVideos = true, includeOr
     }
   }
   const present = files.filter((f) => f.blob);
+
+  // Videos still in pieces go in as pieces (left out, like every video, without videos).
+  const recordings = [];
+  for (const row of await unsavedRecordings(projectId)) {
+    throwIfAborted(signal);
+    if (!includeVideos) {
+      omitted.push({ id: row.recId, role: 'recording', reason: 'videos-not-included', itemId: row.itemId ?? null, kind: 'video', size: 0 });
+      continue;
+    }
+    const pieces = await recordingPieces(row.recId);
+    if (!pieces.length) continue;
+    recordings.push({
+      row,
+      chunks: pieces.map(({ seq, blob }) => ({
+        seq, path: `media/recordings/${row.recId}/${seq}.${extFor(blob.type || row.mimeType, '', 'video')}`,
+        type: blob.type || '', size: blob.size, blob,
+      })),
+    });
+  }
   const fileOf = (id) => {
     const f = id ? byMedia.get(id) : null;
     return f?.blob ? f : null;
@@ -682,6 +771,20 @@ export async function exportProject(projectId, { includeVideos = true, includeOr
   }
   if (stampFailed) warnings.push(`${stampFailed} photo${stampFailed > 1 ? 's are' : ' is'} without the date and position strip (the phone could not redraw ${stampFailed > 1 ? 'them' : 'it'}). The photos themselves are all in the backup.`);
   if (missing.length) warnings.push(`${missing.length} file${missing.length > 1 ? 's' : ''} could not be read from this phone and ${missing.length > 1 ? 'are' : 'is'} not in the backup.`);
+  if (damaged.length) {
+    const itemOf = new Map([...live, ...deleted].map((i) => [i.id, i]));
+    const named = damaged.slice(0, 5).map((d) => {
+      const it = itemOf.get(d.itemId);
+      const what = it ? `#${it.seq} ${it.type || 'item'}` : d.levelId ? `the plan of ${store.getLevel(project, d.levelId)?.name || 'a level'}` : 'a file';
+      return `${what}: ${formatBytes(d.size)} of ${formatBytes(d.expectedSize)}`;
+    });
+    if (damaged.length > named.length) named.push(`and ${damaged.length - named.length} more`);
+    warnings.push(`${damaged.length} file${damaged.length > 1 ? 's are' : ' is'} damaged on this phone, so only part of ${damaged.length > 1 ? 'each' : 'it'} could be read (${named.join('; ')}). What could be read is in the backup.`);
+  }
+  if (recordings.length) {
+    const n = recordings.length;
+    warnings.push(`${n} video${n > 1 ? 's' : ''} the app had not finished saving ${n > 1 ? 'are' : 'is'} in the backup as ${n > 1 ? 'their' : 'its'} recorded pieces. Importing the backup brings ${n > 1 ? 'them' : 'it'} back.`);
+  }
 
   const pathOf = (id) => fileOf(id)?.path || null;
   const counts = {
@@ -728,6 +831,8 @@ export async function exportProject(projectId, { includeVideos = true, includeOr
     viewerFiles: viewerFiles.map((v) => ({ itemId: v.itemId, path: v.path, type: v.type, size: v.size, stamped: v.stamped, markup: v.markup })),
     omitted,
     missing,
+    damaged,
+    recordings: recordings.map(({ row, chunks }) => ({ row, chunks: chunks.map(({ seq, path, type, size }) => ({ seq, path, type, size })) })),
   };
 
   const zip = createZipWriter();
@@ -735,8 +840,14 @@ export async function exportProject(projectId, { includeVideos = true, includeOr
     const used = zip.add(f.path, f.blob, { date: f.createdAt || exportedAt });
     if (used !== f.path) throw new Error(`Two files in the backup would have the same name (${f.path}).`);
   }
+  for (const r of recordings) {
+    for (const c of r.chunks) {
+      const used = zip.add(c.path, c.blob, { date: r.row.startedAt || exportedAt });
+      if (used !== c.path) throw new Error(`Two files in the backup would have the same name (${c.path}).`);
+    }
+  }
   for (const v of viewerFiles) zip.add(v.path, v.blob, { date: exportedAt });
-  zip.add('README.txt', readmeText({ project, settings, exportedAt, counts, complete, omitted, hasViewer: !!indexHtml }), { date: exportedAt, compress: true });
+  zip.add('README.txt', readmeText({ project, settings, exportedAt, counts, complete, omitted, hasViewer: !!indexHtml, hasRecordings: recordings.length > 0 }), { date: exportedAt, compress: true });
   if (indexHtml) zip.add('index.html', indexHtml, { date: exportedAt, compress: true });
   zip.add('jobwalk.json', JSON.stringify(manifest), { date: exportedAt, compress: true });
 
@@ -1012,10 +1123,25 @@ function mediaRefsOf(project, items) {
  * mode 'replace': the same, then the job walk it replaces goes to Recently
  *   Deleted (restorable) — only after the new one is completely saved.
  * Every id is new; every file is saved and verified (store.putMediaWithId)
- * before the records are written in one transaction.
+ * before the records are written in one transaction. A file that is damaged
+ * inside the .zip is left out like a missing one (what points at it becomes
+ * empty, importedFrom.damagedFiles counts it), so one bad video cannot keep
+ * every photo and note out; that copy then does not start as backed up.
+ * Videos still in pieces come back as pieces, rebuilt at the next start.
  * onProgress({phase: 'read'|'media'|'save', message, fraction}).
  */
-export async function importPackage(file, { mode = 'copy', onProgress, signal } = {}) {
+export async function importPackage(file, options = {}) {
+  // The whole import holds the 'jw-import' lock. Its files are saved long
+  // before the job walk record that owns them, and the app starting in
+  // another tab meanwhile would otherwise take them for what an import the
+  // phone killed left behind, and delete them (store.recoverOrphans).
+  return store.withImportLock(() => importUnlocked(file, options));
+}
+
+/** A ZipError for bytes that are wrong — not for a zip this app cannot unpack at all. */
+const isDamage = (err) => err?.name === 'ZipError' && err.code === 'damaged';
+
+async function importUnlocked(file, { mode = 'copy', onProgress, signal } = {}) {
   if (mode !== 'copy' && mode !== 'replace') throw new TypeError("importPackage mode must be 'copy' or 'replace'");
   const report = reporter(onProgress);
   report('read', 'Opening the file…', 0);
@@ -1047,22 +1173,35 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
   const goneMedia = mediaRefsOf(src, srcItems.map(({ i }) => i));
   for (const o of [...(data.omitted || []), ...(data.missing || [])]) if (o?.id) goneMedia.add(o.id);
 
-  // Room for it? (Only refused when the browser clearly says there is not enough.)
+  // There is no "room for it?" check up front: estimate().quota is not free
+  // space (Chrome reports usage + 10 GiB whatever the disk holds —
+  // docs/RESEARCH.md), so it would refuse big backups a PC has room for. The
+  // phone refusing a write (QuotaExceededError) is the real answer; it stops
+  // the import below, with nothing of it left behind.
   const mediaList = data.media.filter((m) => m && typeof m.path === 'string' && typeof m.id === 'string');
-  const totalBytes = mediaList.reduce((n, m) => n + (Number(m.size) || 0), 0);
-  const info = await store.storageInfo();
-  if (info.quota != null && info.usage != null && info.quota - info.usage < totalBytes * 1.05 + 5 * 1024 * 1024) {
-    throw packageError(`There is not enough room on this phone for this job walk: it needs ${formatBytes(totalBytes)} and about ${formatBytes(Math.max(0, info.quota - info.usage))} is free. Free some space (or remove old job walks after backing them up), then try again.`);
-  }
+  const recList = (Array.isArray(data.recordings) ? data.recordings : [])
+    .filter((r) => r?.row && typeof r.row === 'object' && typeof r.row.recId === 'string' && Array.isArray(r.chunks));
+  const totalBytes = mediaList.reduce((n, m) => n + (Number(m.size) || 0), 0) +
+    recList.reduce((n, r) => n + r.chunks.reduce((k, c) => k + (Number(c?.size) || 0), 0), 0);
 
   // ---- 1. every file, saved and verified -------------------------------------------------------
   const written = [];      // new media ids, removed again if the import does not finish
+  const recordings = [];   // {recId, src, kept, saved}: pieces saved; their rows are written last
   const missing = [];
+  const damaged = [];      // damaged inside the .zip: left out like the missing ones
   const srcItemById = new Map(srcItems.map(({ i }) => [i.id, i]));
   const mediaByOldId = new Map(mediaList.map((m) => [m.id, m]));
+  let recordsWritten = false;
   let done = 0;
   const step = (extra = 0) => report('media', `Saving photos and files… ${formatBytes(done + extra)} of ${formatBytes(totalBytes)}`,
     0.02 + 0.93 * (totalBytes ? (done + extra) / totalBytes : 1));
+  // A damaged file is skipped, its bytes still counted as done, so the bar keeps going.
+  const skipDamaged = (what, size, err) => {
+    console.warn('[package] a damaged file in the .zip was left out', what.path, err);
+    damaged.push(what);
+    done += Number(size) || 0;
+    step();
+  };
 
   try {
     for (const m of mediaList) {
@@ -1070,7 +1209,14 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
       const entry = zip.entry(prefix + m.path);
       if (!entry) { missing.push(m); continue; }
       const type = m.type || mimeFromName(m.path);
-      let blob = await entry.blob({ verify: true, type, signal, onProgress: (n) => step(n) });
+      let blob;
+      try {
+        blob = await entry.blob({ verify: true, type, signal, onProgress: (n) => step(n) });
+      } catch (err) {
+        if (!isDamage(err)) throw err;
+        skipDamaged(m, m.size, err);
+        continue;
+      }
       // The viewer copy of a marked-up photo carries the export stamp. Redraw
       // the clean markup from the shapes and the original, so the stamp does
       // not become part of the photo here (and is not stamped twice later).
@@ -1079,7 +1225,10 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
         const origMeta = mediaByOldId.get(item?.media?.original);
         const origEntry = origMeta ? zip.entry(prefix + origMeta.path) : null;
         if (item && origEntry) {
-          const clean = await flattenMarkup(item, await origEntry.blob({ type: origMeta.type || 'image/jpeg', signal }));
+          // A damaged original keeps the stamped copy: better than no markup at all.
+          let orig = null;
+          try { orig = await origEntry.blob({ verify: true, type: origMeta.type || 'image/jpeg', signal }); } catch (err) { if (!isDamage(err)) throw err; }
+          const clean = orig ? await flattenMarkup(item, orig) : null;
           if (clean?.size) blob = clean;
         }
       }
@@ -1092,7 +1241,33 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
       done += Number(m.size) || blob.size;
       step();
     }
-    for (const m of missing) goneMedia.add(m.id);
+    for (const m of [...missing, ...damaged]) goneMedia.add(m.id);
+
+    // Videos still in pieces: the pieces now, under a new recording id; the
+    // recording row only once the job walk exists (the app starting in
+    // another tab removes the pieces of a recording whose job walk is gone).
+    for (const r of recList) {
+      const rec = { recId: uid('r_'), src: r.row, kept: 0, saved: false };
+      recordings.push(rec);
+      for (const c of r.chunks) {
+        throwIfAborted(signal);
+        const entry = c && typeof c.path === 'string' && Number.isInteger(c.seq) ? zip.entry(prefix + c.path) : null;
+        if (!entry) { missing.push({ path: c?.path || '' }); continue; }
+        let blob;
+        try {
+          blob = await entry.blob({ verify: true, type: c.type || mimeFromName(c.path), signal, onProgress: (n) => step(n) });
+        } catch (err) {
+          if (!isDamage(err)) throw err;
+          skipDamaged({ path: c.path }, c.size, err);
+          continue;
+        }
+        if (!blob.size) continue;
+        await store.putChunk(rec.recId, c.seq, blob);
+        rec.kept++;
+        done += Number(c.size) || blob.size;
+        step();
+      }
+    }
 
     // ---- 2. the records, pointing only at files that are really here -------------------------
     report('save', 'Saving the job walk…', 0.96);
@@ -1152,14 +1327,49 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
         originId: lineage(src), sourceId: src.id, fileName: file.name || '', exportedAt: data.exportedAt || null,
         exportedBy: data.exportedBy || '', appVersion: data.appVersion || '', importedAt: now, importedBy: settings.userName || '',
         missingFiles: missing.length,
+        damagedFiles: damaged.length,
       },
     };
-    // The file it came from holds everything that is now here, so this copy starts "backed up".
-    project.backup = { lastAt: data.exportedAt || now, changeSeq: project.changeSeq, fileName: file.name || '' };
+    // The file it came from holds everything that is now here, so this copy
+    // starts "backed up" — unless files in it were damaged: then that file
+    // is not one to rely on, and a fresh backup of this copy is.
+    project.backup = damaged.length ? null : { lastAt: data.exportedAt || now, changeSeq: project.changeSeq, fileName: file.name || '' };
+
+    // Every file saved above must still be here. Where the browser has no
+    // Web Locks, the app starting in another window can take them for
+    // leftovers; the import then stops, rather than bring in a job walk
+    // with holes in it.
+    const here = new Set((await store.listMediaForProject(pid)).map((r) => r.id));
+    if (written.some((id) => !here.has(id))) {
+      throw packageError('Some of the files saved for this import were removed meanwhile (was DCR Job Walk opened in another window?), so nothing was imported. Close the other windows of DCR Job Walk, then import again.');
+    }
 
     throwIfAborted(signal);
     await store.putProjectRecords(project, items);
     written.length = 0; // the records own the files now
+    recordsWritten = true;
+
+    for (const rec of recordings) {
+      if (!rec.kept) continue;
+      const row = remapIds(rec.src, lookup);
+      try {
+        await store.beginRecording({
+          ...row,
+          recId: rec.recId,
+          projectId: pid,
+          levelId: levelIds.has(rec.src.levelId) ? ids.get(rec.src.levelId) : firstLevel,
+          // Built afresh on this phone: no item or file of the other phone's.
+          // (recoveryTries is kept: a video that crashed the app while being
+          // rebuilt waits for "Try again" here too, instead of being tried at
+          // the next start.)
+          itemId: rec.src.itemId && ids.has(rec.src.itemId) ? ids.get(rec.src.itemId) : null,
+          mediaId: rec.src.mediaId && ids.has(rec.src.mediaId) ? ids.get(rec.src.mediaId) : null,
+        });
+        rec.saved = true;
+      } catch (err) {
+        throw packageError(`The job walk was imported, but a video it had not finished saving could not be put back on this phone (${err.message || err}). It is still in the .zip file.`);
+      }
+    }
 
     if (mode === 'replace' && existing && !existing.deletedAt) {
       report('save', 'Moving the old copy to Recently Deleted…', 0.99);
@@ -1170,12 +1380,23 @@ export async function importPackage(file, { mode = 'copy', onProgress, signal } 
   } catch (err) {
     // Nothing points at the files saved so far (the records were never
     // written), so they would only fill the phone. They are copies of what
-    // is still in the .zip, so removing them loses nothing.
+    // is still in the .zip, so removing them loses nothing. The same goes
+    // for the pieces of a video whose recording row was not written.
     for (const id of written) {
       try { await store.deleteMedia(id); } catch { /* best effort */ }
     }
+    for (const rec of recordings) {
+      if (!rec.saved) { try { await store.endRecording(rec.recId); } catch { /* best effort */ } }
+    }
+    if (!recordsWritten && err?.name === 'QuotaExceededError') {
+      const e = packageError(`There is not enough room on this phone for this job walk (it needs about ${formatBytes(totalBytes)}), so nothing was imported. Free some space, or remove old job walks after backing them up, then try again.`);
+      e.cause = err;
+      throw e;
+    }
     if (err?.name === 'ZipError') {
-      throw packageError(`This backup file is damaged, so nothing was imported. ${err.message} Try another copy of the backup.`);
+      throw packageError(err.code === 'damaged'
+        ? `This backup file is damaged, so nothing was imported. ${err.message} Try another copy of the backup.`
+        : `${err.message} Nothing was imported.`);
     }
     throw err;
   }

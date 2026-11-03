@@ -715,7 +715,9 @@ export function createVideoRecorder({ stream, project, level, getPose, quality =
 // try is counted on the row BEFORE the heavy work, and taken back when the
 // try ends in an ordinary error. Only tries that never came back (a crash)
 // stay counted; after MAX_RECOVERY_TRIES the video is left for
-// recoverRecordings({force: true}) — its pieces are never deleted.
+// recoverRecordings({force: true}) (main.js offers it as "Try again"), and
+// its pieces are kept — they go only with a job walk erased for good, and a
+// backup of the job walk counts them (package.js).
 
 export const MAX_RECOVERY_TRIES = 3;
 
@@ -815,6 +817,7 @@ async function recoverAll(st, locks, vInfo, thumbFn, force) {
   if (errors.length && !items.length) {
     const e = new Error(errors[0].message);
     e.errors = errors;
+    e.skipped = skipped; // so a launch that fails can still say a video is waiting for "Try again"
     throw e;
   }
   return Object.assign(items, { errors, skipped });
@@ -830,8 +833,9 @@ async function recoverAll(st, locks, vInfo, thumbFn, force) {
  * MAX_RECOVERY_TRIES times while being rebuilt is skipped (counted in
  * `skipped`) unless {force: true}.
  * Resolves the recovered items, with `errors` (videos that could not be
- * rebuilt yet — their pieces are kept) and `skipped`; rejects only when
- * nothing could be rebuilt and something failed.
+ * rebuilt yet — their pieces are kept) and `skipped` (how many, a number);
+ * rejects only when nothing could be rebuilt and something failed (the
+ * error then carries `errors` and `skipped` too).
  */
 export async function recoverRecordings({ force = false, deps = {} } = {}) {
   const st = deps.store || realStore;

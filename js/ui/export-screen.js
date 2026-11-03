@@ -7,10 +7,12 @@
 //    N changes since the last backup, or backed up ✓.
 //  - "Save backup" makes ONE .zip with everything (js/core/package.js) and
 //    then hands it over. The job walk is marked backed up only once the file
-//    was saved, shared or downloaded — never when the person cancels — and
-//    with the change count read when the export STARTED, so a photo taken
-//    meanwhile still shows as not backed up. A copy without videos is a
-//    shared copy and is never counted as a backup.
+//    was saved or shared, or the person says a download arrived (a download
+//    is only STARTED: iPhone asks first, and the person can say no) — never
+//    when the person cancels or the browser refused (it wanted a fresh tap)
+//    — and with the change count read when the export STARTED, so a photo
+//    taken meanwhile still shows as not backed up. A copy without videos is
+//    a shared copy and is never counted as a backup.
 //  - How it is handed over depends on the browser (docs/RESEARCH.md,
 //    "Storage durability"):
 //      iPhone / iPad / Mac Safari   the share sheet (Save to Files, OneDrive,
@@ -29,7 +31,7 @@
 //  - "Photos only" is a convenience copy (JPEGs and a spreadsheet); it is not
 //    a backup and never marks one.
 
-import { el, iconButton, toast, alertDialog, busy, saveBlob, openSheet } from './shell.js';
+import { el, iconButton, toast, alertDialog, confirmDialog, busy, saveBlob, releaseDownloads, openSheet } from './shell.js';
 import { icon } from './icons.js';
 import * as store from '../core/store.js';
 import { exportProject, exportPhotos, estimateExport, SHARE_SHEET_COMFORT_BYTES } from '../core/package.js';
@@ -140,6 +142,7 @@ export async function open(ctx) {
   let running = null;        // a zip being made, or a file being written: {ac, b}
   let sheet = null;          // the "ready" sheet
   let lastBuilt = null;      // the last zip made here, reused while nothing has changed
+  let tapToast = null;       // "tap again" after the browser refused a save
   let closed = false;
 
   // ---- layout ------------------------------------------------------------------------------
@@ -242,7 +245,11 @@ export async function open(ctx) {
         tile(c.photos, 'photo', 'photos'), tile(c.videos, 'video', 'videos'), tile(c.notes, 'note', 'notes'),
         tile(c.voice, 'voice note', 'voice notes'), tile(c.plans, 'plan', 'plans'));
       sizeEl.replaceChildren(el('span', {}, 'Size'), el('b', {}, `about ${formatBytes(backupBytes())}`));
-      videosDetail.textContent = c.videos ? `${plural(c.videos, 'video')} · ${formatBytes(estimate.bytes.videos)}` : 'No videos in this job walk';
+      // A video the app has not finished saving is in the backup as its pieces, so it counts here too.
+      const vids = c.videos + (c.unsavedVideos || 0);
+      videosDetail.textContent = vids
+        ? `${plural(vids, 'video')}${c.unsavedVideos ? ` (${c.unsavedVideos} not finished saving)` : ''} · ${formatBytes(estimate.bytes.videos)}`
+        : 'No videos in this job walk';
       deletedNote.hidden = !c.deleted;
       deletedNote.textContent = c.deleted
         ? `Also holds the ${plural(c.deleted, 'item')} in Recently Deleted, so restoring the backup loses nothing. The viewer does not show ${c.deleted === 1 ? 'it' : 'them'}.`
@@ -250,8 +257,9 @@ export async function open(ctx) {
       photosBtn.disabled = !c.photos;
       photosNote.hidden = !!c.photos;
     }
-    videosSwitch.disabled = !!estimate && !estimate.counts.videos;
-    noVideosWarn.hidden = includeVideos || !estimate?.counts.videos;
+    const anyVideos = !!(estimate?.counts.videos || estimate?.counts.unsavedVideos);
+    videosSwitch.disabled = !!estimate && !anyVideos;
+    noVideosWarn.hidden = includeVideos || !anyVideos;
     markupDetail.textContent = !withMarkup
       ? 'The untouched original photos'
       : settings.stampExports ? 'Markup drawn in, with the date and position strip' : 'Markup drawn in (the date stamp is off in Settings)';
@@ -402,8 +410,8 @@ export async function open(ctx) {
     });
     sheet = s;
     const go = async (how) => {
-      const outcome = await save(built, how);
-      if (outcome && outcome !== 'cancelled') {
+      const outcome = await save(built, how, () => go(how));
+      if (outcome === 'saved' || outcome === 'shared' || outcome === 'downloaded') {
         saved = true;
         s.close(true);
         if (sheet === s) sheet = null;
@@ -438,10 +446,14 @@ export async function open(ctx) {
 
   /**
    * Save one way ('pick' | 'share' | 'download'). A full backup is marked as
-   * backed up when the file was saved, shared or downloaded. → the outcome,
-   * or null when it failed (the zip is kept, so another way can be tried).
+   * backed up when the file was saved or shared, or once the person says a
+   * download arrived. → the outcome, or null when nothing was saved (the zip
+   * is kept, so another way can be tried). `again` repeats this save from a
+   * new tap, for when the browser refused this one.
    */
-  async function save(built, how) {
+  async function save(built, how, again = null) {
+    tapToast?.close();
+    tapToast = null;
     let outcome;
     try {
       if (how === 'pick') outcome = await writePicked(built);
@@ -455,14 +467,43 @@ export async function open(ctx) {
       if (!closed) toast('Not saved yet. Pick where to save it, or tap Download.', { type: 'info' });
       return outcome;
     }
-    const where = outcome === 'shared' ? 'sent' : outcome === 'saved' ? 'saved' : 'saved — look in Downloads';
+    if (outcome !== 'saved' && outcome !== 'shared' && outcome !== 'downloaded') {
+      // 'needs-tap': the browser wanted a fresh tap (iPhone: the share sheet
+      // refused the first try; Chrome: too long since the tap). No file
+      // exists, so nothing is marked and the Ready sheet stays open.
+      if (!closed) {
+        tapToast = toast('The phone did not open the save screen, so nothing is saved yet. Tap Save to try again.', {
+          type: 'warn', ms: 0, action: { label: 'Save', onclick: again || (() => save(built, how)) },
+        });
+      }
+      return null;
+    }
+    const where = outcome === 'shared' ? 'sent ✓' : outcome === 'saved' ? 'saved ✓' : 'downloading — look in Downloads';
     if (built.kind !== 'backup') {
-      if (!closed) toast(`Photos ${where} ✓`, { type: 'ok', ms: 4000 });
+      if (!closed) toast(`Photos ${where}`, { type: 'ok', ms: 4000 });
       return outcome;
     }
     if (!built.complete) {
-      if (!closed) toast(`Copy ${where} ✓ (without videos — not a full backup).`, { type: 'ok', ms: 6000 });
+      if (!closed) toast(`Copy ${where} (without videos — not a full backup).`, { type: 'ok', ms: 6000 });
       return outcome;
+    }
+    if (outcome === 'downloaded') {
+      // A download was only started: the browser may ask first (iPhone
+      // always does) and the person can say no, and the Home Screen app may
+      // not download at all. So it counts once the person has seen the file.
+      const there = await confirmDialog({
+        title: 'Did the backup download?',
+        message: ways.ios
+          ? `Look in the Files app › Downloads for “${built.fileName}”. If the phone asked whether to download it, tap Download there first.`
+          : `Look in your Downloads folder for “${built.fileName}”.`,
+        okText: 'Yes, it is there',
+        cancelText: 'Not yet',
+      });
+      if (!there) {
+        // (No Ready sheet where a download is the only way: Save backup downloads it again.)
+        if (!closed) toast(sheet ? 'Not counted as a backup yet. Tap Download again, or pick another way.' : 'Not counted as a backup yet. Tap Save backup to download it again.', { type: 'warn' });
+        return null;
+      }
     }
     try {
       await store.markBackedUp(pid, { changeSeq: built.changeSeq, fileName: built.fileName });
@@ -519,6 +560,9 @@ export async function open(ctx) {
     }
     sheet?.close(true);
     sheet = null;
+    tapToast?.close();
+    tapToast = null;
     lastBuilt = null; // drop the zip so its memory can be freed
+    releaseDownloads(); // …including the copy a started download still points at
   };
 }

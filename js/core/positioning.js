@@ -72,6 +72,7 @@ export const TUNING = Object.freeze({
   // Movement between fixes (m² per second added to each axis)
   q: { walking: 0.02, moving: 0.15, stationary: 0.0005, unknown: 1.0 },
   qUnknownBySpeed: { still: 0.1, moving: 1.5 }, // no motion sensor: use the GPS speed when there is one
+  blindSpeed: 1.4,          // m/s — app hidden (phone locked) or positioning stopped: nothing is measured, so the person may have walked anywhere at a walking pace
   stepAlongFrac: 0.2,       // step length error (fixed-K Weinberg is ~20 %)
   stepHeadingSigma: 25,     // deg — the phone is not always pointed where the person walks
   stepHeadingSigmaTop: 20,  // deg — phone held flat (reading the plan): the top edge usually leads
@@ -94,6 +95,17 @@ export function qualityFor(sigma) {
   if (sigma <= 1.5) return 'good';
   if (sigma <= 5) return 'fair';
   return 'poor';
+}
+
+/**
+ * m² per axis for `seconds` with no sensor at all (app hidden, positioning
+ * stopped): the person may have walked up to blindSpeed × seconds in any
+ * direction, so the spread grows with the time itself, not its square root —
+ * a 90 s lock is up to ~125 m, not 9 m. Never less than q.unknown per second.
+ */
+export function blindNoise(seconds) {
+  if (!(seconds > 0)) return 0;
+  return Math.max(TUNING.q.unknown * seconds, (TUNING.blindSpeed * seconds) ** 2 / 2);
 }
 
 /** σ per axis (m) for a fix's coords.accuracy. */
@@ -510,6 +522,8 @@ export class PositioningEngine extends Emitter {
     this.statusKey = '';
     this.status = null;
     this.stoppedAt = null;
+    this.blindFrom = null;            // when the sensors went dark (app hidden or stopped); null while they run
+    this.movedUnseen = false;         // a dark spell since GPS last agreed: the person may have moved, so a jump is not "GPS wrong"
     this.declCache = { key: '', value: null };
     this.warnedHeading = false;
     this.coarseFix = null;
@@ -537,6 +551,8 @@ export class PositioningEngine extends Emitter {
     this.startSources();
     this.tickTimer = this.deps.timers.setInterval(() => this.tick(), 1000);
     this.watchVisibility();
+    // Nothing was measured while stopped: that time counts as unknown movement.
+    if (!this.pageHidden()) this.endBlind(t);
     this.ensureCalibrationModule();
     this.refreshStatus();
     this.schedulePose();
@@ -554,6 +570,7 @@ export class PositioningEngine extends Emitter {
     this.visibilityOff?.();
     this.visibilityOff = null;
     this.stoppedAt = this.now();
+    if (this.blindFrom == null) this.blindFrom = this.stoppedAt;
     this.refreshStatus();
   }
 
@@ -630,8 +647,11 @@ export class PositioningEngine extends Emitter {
       if (doc.visibilityState === 'hidden') {
         // No sensor events while hidden; the direction may have changed by the time it returns.
         this.orient = null;
+        // …and no steps or GPS either: from now on nobody knows where the person goes.
+        if (this.blindFrom == null) this.blindFrom = this.now();
         this.poseDirty = true;
       } else if (doc.visibilityState === 'visible') {
+        this.endBlind(this.now());
         try { this.sources.gps?.resume?.(); } catch { /* ignore */ }
         this.refreshStatus();
         this.schedulePose();
@@ -641,8 +661,31 @@ export class PositioningEngine extends Emitter {
     this.visibilityOff = () => doc.removeEventListener('visibilitychange', fn);
   }
 
+  pageHidden() {
+    try { return this.deps.win()?.document?.visibilityState === 'hidden'; } catch { return false; }
+  }
+
+  /**
+   * The sensors are back (the app is on screen again, or positioning started
+   * again). The time they were dark is charged as unknown movement at a
+   * walking pace — not at whatever the motion sensor says now: someone who
+   * locks the phone, walks 40 m and stands still to shoot is 'stationary' on
+   * return, and the old spot must not hold the new fixes off for half a
+   * minute while claiming ±2 m.
+   */
+  endBlind(t) {
+    if (this.blindFrom == null) return;
+    this.advance(t);
+    if (this.kf.initialized && t > this.blindFrom) this.movedUnseen = true;
+    this.blindFrom = null;
+    this.poseDirty = true;
+  }
+
   tick() {
     if (!this.running) return;
+    // Let time pass every second, so each second is charged at the motion of
+    // THAT second, not at whatever it is when the next fix or step comes.
+    this.advance(this.now());
     this.refreshStatus();
     // Keep screens current (accuracy grows while nothing comes in).
     if (this.kf.initialized && this.now() - this.lastPoseAt > 900) this.schedulePose();
@@ -659,6 +702,7 @@ export class PositioningEngine extends Emitter {
     this.bias = null;
     this.manual = null;
     this.coarseFix = null;
+    this.movedUnseen = false;
     if (!validOrigin(this.project?.origin)) {
       this.frameOrigin = null;
       this.provisionalOrigin = null;
@@ -712,6 +756,9 @@ export class PositioningEngine extends Emitter {
     this.onOrigin = typeof onOrigin === 'function' ? onOrigin : null;
     const id = this.project?.id ?? null;
     if (id !== prevId) {
+      // Another job walk is another place (maybe a drive away): the last walk's
+      // estimate must not hold this one's first fixes off as "GPS jumping".
+      if (prevId != null) this.resetEstimate();
       this.bias = null;
       this.manual = null;
       this.originRequestedFor = null;
@@ -817,13 +864,30 @@ export class PositioningEngine extends Emitter {
     return q;
   }
 
+  /**
+   * m² per axis the person may have moved between the last advance and t:
+   * time with the sensors running at the current motion's rate, time with
+   * them dark (app hidden, positioning stopped) as unknown movement
+   * (blindNoise). The dark part is how much blindNoise grew over the dark
+   * spell since the last advance, so a spell split over several calls costs
+   * the same as one.
+   */
+  gapNoise(t) {
+    const from = this.lastAdvanceT;
+    if (from == null || !(t > from)) return 0;
+    const dark = this.blindFrom;
+    const seenUntil = dark == null ? t : clamp(dark, from, t);
+    let v = this.processNoise(this.motionState(t), t) * (seenUntil - from) / 1000;
+    if (dark != null && t > dark) v += blindNoise((t - dark) / 1000) - blindNoise(Math.max(0, from - dark) / 1000);
+    return v;
+  }
+
   /** Let time pass in the filter up to t (uncertainty grows with how the person may have moved). */
   advance(t) {
     if (!this.kf.initialized) { this.lastAdvanceT = t; return; }
     if (this.lastAdvanceT == null) { this.lastAdvanceT = t; return; }
-    const dt = (t - this.lastAdvanceT) / 1000;
-    if (!(dt > 0)) return;
-    this.kf.addNoise(this.processNoise(this.motionState(t), t) * dt);
+    if (!(t > this.lastAdvanceT)) return;
+    this.kf.addNoise(this.gapNoise(t));
     this.lastAdvanceT = t;
   }
 
@@ -831,8 +895,7 @@ export class PositioningEngine extends Emitter {
   sigmaAt(t) {
     const s = this.kf.sigma();
     if (s == null) return null;
-    const dt = this.lastAdvanceT == null ? 0 : Math.max(0, (t - this.lastAdvanceT) / 1000);
-    return Math.sqrt(s * s + this.processNoise(this.motionState(t), t) * dt);
+    return Math.sqrt(s * s + this.gapNoise(t));
   }
 
   // ---- GPS ---------------------------------------------------------------------------------
@@ -912,9 +975,14 @@ export class PositioningEngine extends Emitter {
       this.lastAdvanceT = t;
       this.lastGpsUpdateT = fix.t;
       this.bestGpsSigma = sg;
+      this.movedUnseen = false;
       return;
     }
-    const still = motion === 'stationary' && this.recentFixes.slice(-TUNING.maxRejects - 1).every((f) => f.motion === 'stationary');
+    // "Has not moved" needs the sensors to have watched all along: after the
+    // app was hidden or stopped, standing still NOW says nothing about where
+    // the person walked meanwhile, so a fix far from the old spot is not GPS
+    // jumping until one has been accepted.
+    const still = !this.movedUnseen && motion === 'stationary' && this.recentFixes.slice(-TUNING.maxRejects - 1).every((f) => f.motion === 'stationary');
     // Starting cold, the first fixes are often coarse (Wi-Fi) and further off than
     // they claim; the first much better fix is believed rather than gated out.
     const coldStart = this.bestGpsSigma == null || sg < this.bestGpsSigma / 2;
@@ -924,6 +992,7 @@ export class PositioningEngine extends Emitter {
       gateR: sg * sg + w * w * sBe2,
     });
     if (!res.accepted) return;
+    this.movedUnseen = false;
     this.bestGpsSigma = this.bestGpsSigma == null ? sg : Math.min(this.bestGpsSigma, sg);
     if (res.reset) {
       // The filter disagreed with GPS for too long: start again from GPS, and
@@ -1179,6 +1248,7 @@ export class PositioningEngine extends Emitter {
     this.manual = { e: enu.e, n: enu.n, t };
     this.kf.init(enu.e, enu.n, TUNING.manualSigma);
     this.lastAdvanceT = t;
+    this.movedUnseen = false;
     // The next fix is a fresh measurement of the corrected GPS, not a repeat of the last one.
     this.lastGpsUpdateT = null;
     this.poseDirty = true;

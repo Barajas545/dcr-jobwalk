@@ -320,6 +320,54 @@ export function pickFiles({ accept = '', multiple = false, capture } = {}) {
   });
 }
 
+/** What Chrome's share sheet takes (it refuses other files, a .zip among them, even when canShare() says yes). */
+const CHROME_SHAREABLE = /^(image\/(jpeg|png|webp|gif|bmp|avif)|video\/(mp4|webm|mpeg|ogg)|audio\/[a-z0-9.+-]+|text\/(plain|csv)|application\/pdf)$/;
+/** Chrome on Android shares at most about this much. */
+const CHROME_SHARE_MAX_BYTES = 50 * 1024 * 1024;
+/** Types the share sheet refused this session: saved another way from then on, so "tap again" cannot loop. */
+const shareRefused = new Set();
+
+const baseType = (type) => String(type || '').split(';')[0].trim().toLowerCase();
+
+/**
+ * The share sheet with one file. → 'shared' | 'cancelled' | 'needs-tap', or
+ * null when the file should be saved another way. Builds the File and calls
+ * share() before any await, so the tap still counts.
+ */
+async function shareFile(blob, fileName, type, title) {
+  const file = new File([blob], fileName, { type });
+  let can = false;
+  try { can = !!navigator.canShare?.({ files: [file] }); } catch { can = false; }
+  if (!can) return null;
+  try {
+    await navigator.share({ files: [file], title: title || fileName });
+    return 'shared';
+  } catch (err) {
+    if (err?.name === 'AbortError') return 'cancelled';
+    // iPhone: the tap was used up (or the pre-27.2 bug that drops it on the first try).
+    if (err?.name === 'NotAllowedError' && isIOSDevice()) return 'needs-tap';
+    shareRefused.add(baseType(type));
+    console.warn('[saveBlob] the share sheet refused the file, saving it instead', err);
+    // A picker or download started after the tap was used up is refused, or
+    // does nothing while looking started — ask for a fresh tap instead.
+    if (navigator.userActivation && !navigator.userActivation.isActive) return 'needs-tap';
+    return null;
+  }
+}
+
+// Object URLs of downloads started here. The browser can take a while to
+// fetch one (iPhone first asks "Download?"), so each is kept for
+// DOWNLOAD_URL_LIFE_MS (the browser drops them all when the page goes away),
+// or until the screen that started it calls releaseDownloads() — not cut
+// off after a minute.
+const DOWNLOAD_URL_LIFE_MS = 10 * 60 * 1000;
+const downloads = new Set();
+
+/** Let go of every download started by saveBlob (a screen holding big files calls this when it closes). */
+export function releaseDownloads() {
+  for (const d of [...downloads]) d.release();
+}
+
 /**
  * Save a Blob as a file the person keeps. MUST be called straight from a tap
  * (no long await before it): the picker and the share sheet both need a
@@ -331,12 +379,26 @@ export function pickFiles({ accept = '', multiple = false, capture } = {}) {
  *  - iPhone/iPad: the share sheet ("Save to Files", OneDrive, Mail…).
  *  - Otherwise: a normal download.
  *
- * Resolves 'saved' | 'shared' | 'downloaded' | 'cancelled' | 'needs-tap'
- * ('needs-tap': the browser wanted a fresh tap — show a "Tap to save"
- * button that calls saveBlob again).
+ * `share: true` is for a Share button: the share sheet first on every
+ * browser that takes the file (Android too, for a photo, video or voice
+ * note), else saved as above. `preferShare` only chooses the share sheet
+ * on iPhone, so Download and the rescue saves keep the picker on Android.
+ *
+ * Resolves 'saved' | 'shared' | 'downloaded' | 'cancelled' | 'needs-tap'.
+ * Only 'saved' and 'shared' prove the file exists; 'downloaded' means a
+ * download was started (the person may still refuse it). 'needs-tap': the
+ * browser wanted a fresh tap and nothing was saved — show a "Tap to save"
+ * button that calls saveBlob again.
  */
-export async function saveBlob(blob, fileName, { preferShare = true, title = '', types } = {}) {
+export async function saveBlob(blob, fileName, { preferShare = true, share = false, title = '', types } = {}) {
   const type = blob.type || 'application/octet-stream';
+  let shareTried = false;
+  if (share && typeof File === 'function' && typeof navigator.share === 'function' && !shareRefused.has(baseType(type)) &&
+      (isIOSDevice() || (CHROME_SHAREABLE.test(baseType(type)) && blob.size <= CHROME_SHARE_MAX_BYTES))) {
+    shareTried = true;
+    const r = await shareFile(blob, fileName, type, title);
+    if (r) return r;
+  }
   if (typeof window.showSaveFilePicker === 'function' && !isIOSDevice()) {
     try {
       const ext = (fileName.match(/\.[a-z0-9]+$/i) || [''])[0];
@@ -352,23 +414,25 @@ export async function saveBlob(blob, fileName, { preferShare = true, title = '',
       if (err?.name === 'SecurityError' || err?.name === 'NotAllowedError') return 'needs-tap';
       console.warn('[saveBlob] picker failed, downloading instead', err);
     }
-  } else if (preferShare && isIOSDevice() && typeof File === 'function') {
-    const file = new File([blob], fileName, { type });
-    if (navigator.canShare?.({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: title || fileName });
-        return 'shared';
-      } catch (err) {
-        if (err?.name === 'AbortError') return 'cancelled';
-        if (err?.name === 'NotAllowedError') return 'needs-tap';
-        // Fall through to a download.
-      }
-    }
+  } else if ((preferShare || share) && !shareTried && isIOSDevice() && typeof File === 'function' && !shareRefused.has(baseType(type))) {
+    const r = await shareFile(blob, fileName, type, title);
+    if (r) return r;
+    // Otherwise a download.
   }
   const url = URL.createObjectURL(blob);
   const a = el('a', { href: url, download: fileName, style: { display: 'none' } });
   document.body.append(a);
   a.click();
-  setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 60_000);
+  let timer = null;
+  const d = {
+    release() {
+      if (!downloads.delete(d)) return;
+      clearTimeout(timer);
+      a.remove();
+      URL.revokeObjectURL(url);
+    },
+  };
+  downloads.add(d);
+  timer = setTimeout(() => d.release(), DOWNLOAD_URL_LIFE_MS);
   return 'downloaded';
 }

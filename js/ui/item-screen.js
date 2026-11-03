@@ -470,8 +470,25 @@ const modalOpen = () => !!document.querySelector('#overlays .modal-back, #overla
 // A floor plan can be 6000+ px, so it is decoded once per page and kept in
 // app.cache under 'plan:<mediaId>' (other screens may share the key; a plain
 // '<mediaId>' entry holding a decoded image is used too).
+//
+// A decoded plan is up to ~64 MB, so only the two most recently used stay in
+// the cache, the same rule as the project and calibrate screens. The cache
+// Map's own order is the order of use, so the screens agree on it: a plan
+// used again moves to the end, and keeping a new one drops the oldest
+// (dropped, not closed: a screen still showing it keeps its own reference).
 
 const planLoads = new Map();
+const PLAN_CACHE_KEEP = 2;
+
+/** Put (or move) `key` last in `cache` and drop all but the newest `keep` 'plan:' entries. */
+export function keepPlanCached(cache, key, image, keep = PLAN_CACHE_KEEP) {
+  if (!cache || typeof cache.set !== 'function') return;
+  cache.delete?.(key);
+  cache.set(key, image);
+  if (typeof cache.keys !== 'function') return;
+  const plans = [...cache.keys()].filter((k) => typeof k === 'string' && k.startsWith('plan:'));
+  for (const k of plans.slice(0, Math.max(0, plans.length - keep))) cache.delete(k);
+}
 
 function isDrawable(x) {
   if (!x || typeof x !== 'object') return false;
@@ -495,7 +512,9 @@ async function loadPlanImage(cache, plan) {
   const key = `plan:${plan.mediaId}`;
   for (const k of [key, plan.mediaId]) {
     const hit = cache?.get?.(k);
-    if (isDrawable(hit)) return hit;
+    if (!isDrawable(hit)) continue;
+    if (k === key) keepPlanCached(cache, key, hit);   // used again: the newest now
+    return hit;
   }
   if (planLoads.has(plan.mediaId)) return planLoads.get(plan.mediaId);
   const p = (async () => {
@@ -506,7 +525,7 @@ async function loadPlanImage(cache, plan) {
       try { img = await createImageBitmap(blob); } catch { img = null; }
     }
     if (!img) img = await blobToImage(blob);
-    cache?.set?.(key, img);
+    keepPlanCached(cache, key, img);
     return img;
   })();
   planLoads.set(plan.mediaId, p);
@@ -795,7 +814,8 @@ function createZoomViewer(host, { label = '', onSwipe = null, onTap = null } = {
 
 /**
  * Open the item screen (docs/SPEC.md §3, §10). Returns its cleanup.
- * ctx.query.move === '1' opens "Move pin" straight away.
+ * ctx.query.move === '1' opens "Move pin" straight away; ctx.query.focus ===
+ * 'text' puts the caret in the Notes box (a new note from the Note button).
  */
 export async function open(ctx) {
   const { root, params } = ctx;
@@ -864,7 +884,7 @@ export async function open(ctx) {
   let level = store.getLevel(project, item.levelId);
   let nav = { prev: null, next: null, index: -1, count: 0 };
   const base = { title: item.title || '', text: item.text || '' }; // what the store held when last read/saved
-  const blobs = { key: '', original: null, annotated: null };      // Blob handles, ready for Share (iOS needs them before the tap)
+  const blobs = { key: '', original: null, annotated: null, originalError: null }; // Blob handles, ready for Share (iOS needs them before the tap)
   root.classList.add(`is-${item.type}`);
 
   const media = el('div', { class: 'item-media' });
@@ -963,6 +983,7 @@ export async function open(ctx) {
   // ================= media: video =================
 
   let video = null;
+  let videoUrl = null;            // the player's object URL, revoked at cleanup
   let pendingSeek = null;
   let raf = 0;
   const videoMsg = el('div', { class: 'zv-msg', hidden: true });
@@ -990,11 +1011,19 @@ export async function open(ctx) {
     offs.push(attachSwipe(wrap, (dir) => go(dir === 'next' ? 1 : -1), { ignore: (e) => e.clientY > wrap.getBoundingClientRect().bottom - 84 }));
     const m = item.media || {};
     try {
-      const [poster, src] = await Promise.all([scope.url(m.poster), scope.url(m.original)]);
+      // The player plays the same Blob that refreshBlobs reads for Share and
+      // Download, not a second read of its own: a long walk-through video is
+      // hundreds of MB, and two copies can close Safari's tab. Only the small
+      // poster goes through the URL scope.
+      const [poster] = await Promise.all([scope.url(m.poster), refreshBlobs()]);
       if (disposed) return;
       if (poster) video.poster = poster;
-      if (!src) { showVideoProblem('The video file is missing on this phone.'); return; }
-      video.src = src;
+      if (!blobs.original) {
+        showVideoProblem(blobs.originalError ? `The video could not be opened: ${blobs.originalError.message || blobs.originalError}` : 'The video file is missing on this phone.');
+        return;
+      }
+      videoUrl = URL.createObjectURL(blobs.original);
+      video.src = videoUrl;
     } catch (err) {
       if (!disposed) showVideoProblem(`The video could not be opened: ${err.message}`);
     }
@@ -2120,18 +2149,42 @@ export async function open(ctx) {
   const fileCard = el('div', { class: 'card item-card' });
   const fileSection = section('File', null, fileCard);
 
-  async function refreshBlobs() {
+  // The files are read once per open (and again only when they change): a
+  // second call while the read is running gets that same read, so the video
+  // player and the File section share one copy of the bytes.
+  let blobsRead = Promise.resolve();
+  let blobsReading = false;       // a read is running; Share / Download wait for it
+  let blobsReadAt = 0;            // when it started
+  function refreshBlobs() {
     const m = item.media || {};
     const key = `${m.original}|${m.annotated}`;
-    if (blobs.key === key) return;
+    if (blobs.key === key) return blobsRead;
     blobs.key = key;
-    const [o, a] = await Promise.all([
-      m.original ? store.getMediaBlob(m.original).catch(() => null) : null,
-      m.annotated ? store.getMediaBlob(m.annotated).catch(() => null) : null,
-    ]);
-    if (blobs.key !== key) return;
-    blobs.original = o;
-    blobs.annotated = a;
+    blobsReading = true;
+    blobsReadAt = Date.now();
+    blobsRead = (async () => {
+      let originalError = null;
+      const [o, a] = await Promise.all([
+        m.original ? store.getMediaBlob(m.original).catch((err) => { originalError = err; return null; }) : null,
+        m.annotated ? store.getMediaBlob(m.annotated).catch(() => null) : null,
+      ]);
+      if (blobs.key !== key) return;   // a newer read took over
+      blobs.original = o;
+      blobs.annotated = a;
+      blobs.originalError = originalError;
+      blobsReading = false;
+    })();
+    return blobsRead;
+  }
+
+  // Share or Download found no file yet: read it again, unless a read is
+  // still running. Then it is waited for, not started a second time: a tap
+  // while a long video is still being read would hold two copies again. A
+  // read stuck for half a minute (a phone database that stopped answering)
+  // is started again, so a tap can still get the file.
+  function retryBlobs() {
+    if (!blobsReading || Date.now() - blobsReadAt > 30000) blobs.key = '';
+    refreshBlobs().then(renderFile);
   }
 
   function renderFile() {
@@ -2187,8 +2240,7 @@ export async function open(ctx) {
     const blob = useMarked ? blobs.annotated : blobs.original;
     if (!blob) {
       toast('The file is still being read. Try again in a moment.', { type: 'warn' });
-      blobs.key = '';
-      refreshBlobs().then(renderFile);
+      retryBlobs();
       return;
     }
     const name = fileNameFor(item, { levelName: level?.name, variant: useMarked ? 'annotated' : 'original', mimeType: blob.type });
@@ -2209,8 +2261,7 @@ export async function open(ctx) {
     const blob = variant === 'annotated' ? blobs.annotated : blobs.original;
     if (!blob) {
       toast('The file is still being read. Try again in a moment.', { type: 'warn' });
-      blobs.key = '';
-      refreshBlobs().then(renderFile);
+      retryBlobs();
       return;
     }
     const name = fileNameFor(item, { levelName: level?.name, variant, mimeType: blob.type });
@@ -2560,6 +2611,20 @@ export async function open(ctx) {
     renderTags();
   }).catch((err) => console.warn('[item] the items panel tag list could not be loaded; using the built-in one', err));
   if (ctx.query?.move === '1' && canMovePin()) openPlace({ move: true });
+  // The Note button opens its new note with ?focus=text, to be typed: bring
+  // the Notes box on screen (it is below the tags on a phone) and put the
+  // caret in it. iOS may not raise the keyboard without a tap, but the box
+  // is in view.
+  if (ctx.query?.focus === 'text') {
+    requestAnimationFrame(() => {
+      if (disposed) return;
+      try {
+        notes.scrollIntoView({ block: 'center' });
+        notes.focus({ preventScroll: true });
+        notes.setSelectionRange(notes.value.length, notes.value.length);
+      } catch { /* an old browser: the box is still there to tap */ }
+    });
+  }
 
   // ================= cleanup =================
 
@@ -2593,6 +2658,7 @@ export async function open(ctx) {
     if (video) {
       try { video.pause(); video.removeAttribute('src'); video.load(); } catch { /* gone */ }
     }
+    if (videoUrl) { URL.revokeObjectURL(videoUrl); videoUrl = null; }
     if (overlay) { overlay.pushed = false; closeOverlay({ fromHistory: true }); }
     destroyMini();
     destroyTrack();

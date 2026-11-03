@@ -167,6 +167,22 @@
 .cal-actions > .btn { flex: 1 1 auto; }
 .cal-actions > .btn-ghost { flex: 0 1 auto; }
 
+/* A step's last row of buttons that must stay in reach (Cancel / Done while
+   measuring): on a small phone in a Safari tab the panel is only ~275 px
+   tall, so it sticks to the foot of the panel and the text scrolls under it.
+   Only ever the panel's last child, so nothing after it is covered; the
+   shadow paints the panel's bottom padding below it, so text scrolling
+   under shows only above the buttons. */
+.cal-panel > .cal-dock:last-child {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-top: 2px;            /* + the padding: the usual 10 px gap */
+  padding-top: 8px;
+  background: var(--surface);
+  box-shadow: 0 calc(16px + var(--safe-bottom)) 0 var(--surface);
+}
+
 /* ---- measuring ------------------------------------------------------------------ */
 
 .cal-stats {

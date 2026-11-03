@@ -231,6 +231,100 @@ test('standing still, a GPS jump is held off much longer (the person did not mov
   engine.stop();
 });
 
+/** A document whose visibility the test switches (set('hidden') / set('visible')). */
+function fakeDoc() {
+  const fns = new Set();
+  const doc = {
+    visibilityState: 'visible',
+    addEventListener: (type, fn) => { if (type === 'visibilitychange') fns.add(fn); },
+    removeEventListener: (type, fn) => { fns.delete(fn); },
+    set(state) { doc.visibilityState = state; for (const fn of [...fns]) fn(); },
+  };
+  return doc;
+}
+
+test('phone locked, walked 40 m, standing still on return: the new spot is followed at once, and the old one is not claimed as ±2 m', () => {
+  const doc = fakeDoc();
+  const { engine, env, fixEnu, mot } = makeEngine({ win: { document: doc } });
+  engine.setContext({ project: project(), level: level() });
+  engine.start();
+  mot.state = 'stationary';
+  for (let i = 0; i < 60; i++) { env.advance(1000); fixEnu(0, 0, 4); }
+  assert.equal(engine.getPose().quality, 'fair');
+  // A glance at another app while standing there costs little.
+  doc.set('hidden');
+  env.advance(2000);
+  doc.set('visible');
+  assert.equal(engine.getPose().quality, 'fair', `after 2 s away: ±${engine.getPose().geo.acc}`);
+  env.advance(1000); fixEnu(0, 0, 4);
+  // Locked for 90 s while walking 40 m; back on screen the sensor says 'stationary' at once.
+  doc.set('hidden');
+  mot.state = 'unknown';
+  env.advance(45_000);
+  assert.equal(engine.getPose().quality, 'poor', 'while hidden, nobody knows where the person is');
+  env.advance(45_000);
+  doc.set('visible');
+  mot.state = 'stationary';
+  let p = engine.getPose();
+  assert.equal(p.quality, 'poor');
+  assert.ok(p.geo.acc > 40, `the 90 s away count as walking: ±${p.geo.acc}`);
+  env.advance(1000);
+  fixEnu(40, 0, 4);
+  p = engine.getPose();
+  assert.ok(Math.abs(p.enu.e - 40) < 1.5, `followed at once: ${p.enu.e}`);
+  assert.notEqual(p.quality, 'poor');
+  engine.stop();
+});
+
+test('after time away, standing still does not hold off a far jump for half a minute (a drive)', () => {
+  const doc = fakeDoc();
+  const { engine, env, fixEnu, mot } = makeEngine({ win: { document: doc } });
+  engine.setContext({ project: project(), level: level() });
+  engine.start();
+  mot.state = 'stationary';
+  for (let i = 0; i < 30; i++) { env.advance(1000); fixEnu(0, 0, 4); }
+  doc.set('hidden');
+  env.advance(5000);
+  doc.set('visible');
+  // 200 m in 5 s is faster than walking, so the first fixes are gated out — but
+  // only up to the usual 5, not the 30 kept for someone who never moved.
+  for (let i = 0; i < TUNING.maxRejects + 1; i++) { env.advance(1000); fixEnu(200, 0, 4); }
+  assert.ok(engine.getPose().enu.e > 150, `followed after ${TUNING.maxRejects + 1} fixes: ${engine.getPose().enu.e}`);
+  // Once GPS and the filter agree again, a jump while standing still is held off as before.
+  for (let i = 0; i < 10; i++) { env.advance(1000); fixEnu(200, 0, 4); }
+  for (let i = 0; i < 10; i++) { env.advance(1000); fixEnu(240, 0, 4); }
+  assert.ok(engine.getPose().enu.e < 205, `held: ${engine.getPose().enu.e}`);
+  engine.stop();
+});
+
+test('positioning stopped and started again: the time stopped counts as walking; another job walk starts afresh', () => {
+  const { engine, env, fixEnu, fix, mot } = makeEngine();
+  engine.setContext({ project: project(), level: level() });
+  engine.start();
+  mot.state = 'stationary';
+  for (let i = 0; i < 30; i++) { env.advance(1000); fixEnu(0, 0, 4); }
+  // Back to the list for a minute, then the same walk again 40 m away.
+  engine.stop();
+  env.advance(60_000);
+  engine.start();
+  assert.equal(engine.getPose().quality, 'poor');
+  env.advance(1000);
+  fixEnu(40, 0, 4);
+  assert.ok(Math.abs(engine.getPose().enu.e - 40) < 1.5, `same walk: ${engine.getPose().enu.e}`);
+  for (let i = 0; i < 10; i++) { env.advance(1000); fixEnu(40, 0, 4); }
+  // An 8-minute drive (under the 10-minute forget time) to another job walk 1.7 km away.
+  engine.stop();
+  env.advance(8 * 60_000);
+  const there = fromEnu(SAC, 1700, 300);
+  engine.setContext({ project: project({ id: 'p2', origin: { ...there, setAt: 2 } }), level: level() });
+  engine.start();
+  env.advance(1000);
+  fix(there.lat, there.lng, 4);
+  const p = engine.getPose();
+  assert.ok(Math.hypot(p.enu.e, p.enu.n) < 1, `at the new walk at once: ${p.enu.e}, ${p.enu.n}`);
+  engine.stop();
+});
+
 test('stale fixes (> 10 s old), duplicates and city-level fixes are ignored', () => {
   const { engine, env, fix } = makeEngine();
   engine.setContext({ project: project(), level: level() });

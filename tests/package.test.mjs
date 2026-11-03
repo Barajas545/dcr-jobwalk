@@ -471,22 +471,183 @@ test('files that are not a job walk are refused with plain words', async () => {
   await assert.rejects(pkg.importPackage(new File([bytes(10, 1)], 'x.zip'), { mode: 'merge' }), /copy' or 'replace/);
 });
 
-test('a damaged photo stops the import and leaves no stray bytes behind', async () => {
+/** The data offset of a stored entry inside the zip's bytes. */
+function dataStartOf(all, e) {
+  const hv = new DataView(all.buffer, e.offset, 30);
+  return e.offset + 30 + hv.getUint16(26, true) + hv.getUint16(28, true);
+}
+
+/** Every central-directory record of a zip our writer made (no comment, no ZIP64): [{at, name}]. */
+function centralRecords(all) {
+  const dv = new DataView(all.buffer);
+  const eocd = all.length - 22;
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const n = dv.getUint16(p + 28, true);
+    out.push({ at: p, name: new TextDecoder().decode(all.subarray(p + 46, p + 46 + n)) });
+    p += 46 + n + dv.getUint16(p + 30, true) + dv.getUint16(p + 32, true);
+  }
+  return out;
+}
+
+test('a damaged photo is left out; every other photo and note still comes in', async () => {
   const f = await makeFixture('Damaged');
   const res = await pkg.exportProject(f.p.id);
   const z = await readZip(res.blob);
-  const e = z.entry(`media/photos/001-${f.photo.id}.jpg`);
+  const e = z.entry(`media/photos/002-${f.photo2.id}.jpg`);
   const all = new Uint8Array(await res.blob.arrayBuffer());
-  const hv = new DataView(all.buffer, e.offset, 30);
-  const dataStart = e.offset + 30 + hv.getUint16(26, true) + hv.getUint16(28, true);
-  all[dataStart + 1000] ^= 0x5a;
+  all[dataStartOf(all, e) + 1000] ^= 0x5a;
+  const pid = await pkg.importPackage(new File([all], 'bad.zip'));
+  const np = await store.getProject(pid);
+  assert.equal(np.importedFrom.damagedFiles, 1);
+  assert.equal(np.backup, null, 'a copy with damaged files does not start as backed up');
+  assert.equal(store.backupState(np).needed, true);
+  const items = await store.listItems(pid, { includeDeleted: true });
+  assert.equal(items.length, 5, 'every item came in');
+  const ph2 = items.find((i) => i.seq === 2);
+  assert.equal(ph2.media.original, null, 'the damaged photo is left out, like a missing one');
+  const ph = items.find((i) => i.seq === 1);
+  await same(await store.getMediaBlob(ph.media.original), await store.getMediaBlob(f.m.original));
+  await same(await store.getMediaBlob(ph.media.annotated), await store.getMediaBlob(f.m.annotated));
+  assert.equal(items.find((i) => i.seq === 4).text, 'Missing blocking at stair 2', 'notes come in');
+  const media = await store.listMediaForProject(pid);
+  assert.equal(media.length, (await store.listMediaForProject(f.p.id)).length - 1, 'everything but the damaged file');
+});
+
+test('a zip this app cannot unpack still stops the import, and leaves no stray bytes behind', async () => {
+  const f = await makeFixture('Unreadable');
+  const res = await pkg.exportProject(f.p.id);
+  const all = new Uint8Array(await res.blob.arrayBuffer());
+  // The second photo says it uses a compression method the app does not read (7-Zip's LZMA, say).
+  const rec = centralRecords(all).find((r) => r.name === `media/photos/002-${f.photo2.id}.jpg`);
+  new DataView(all.buffer).setUint16(rec.at + 10, 14, true);
   const mediaBefore = (await db.getAll('media')).length;
   const partsBefore = (await db.getAllKeys('parts')).length;
   const projectsBefore = (await store.listProjects()).length;
-  await assert.rejects(pkg.importPackage(new File([all], 'bad.zip')), /damaged.*nothing was imported/s);
-  assert.equal((await db.getAll('media')).length, mediaBefore, 'files saved before the damage was found are removed again');
+  await assert.rejects(pkg.importPackage(new File([all], 'lzma.zip')), (err) => err.name === 'PackageError' && /method 14.*Nothing was imported/s.test(err.message));
+  assert.equal((await db.getAll('media')).length, mediaBefore, 'files saved before it are removed again');
   assert.equal((await db.getAllKeys('parts')).length, partsBefore, 'and their bytes');
   assert.equal((await store.listProjects()).length, projectsBefore);
+});
+
+test('a zip made with backslashes in its names (Windows PowerShell) imports every photo', async () => {
+  const f = await makeFixture('Backslashes');
+  const res = await pkg.exportProject(f.p.id);
+  const all = new Uint8Array(await res.blob.arrayBuffer());
+  const z = await readZip(res.blob);
+  const swap = (from, n) => { for (let i = 0; i < n; i++) if (all[from + i] === 0x2f) all[from + i] = 0x5c; };
+  const dv = new DataView(all.buffer);
+  for (const e of z.entries) swap(e.offset + 30, dv.getUint16(e.offset + 26, true));
+  for (const r of centralRecords(all)) swap(r.at + 46, dv.getUint16(r.at + 28, true));
+  assert.ok(centralRecords(all).some((r) => r.name.includes('media\\photos\\')), 'the names really have backslashes');
+  const file = new File([all], 'Compress-Archive.zip');
+  const info = await pkg.inspectPackage(file);
+  assert.equal(info.missingFiles, 0);
+  assert.equal(info.complete, true);
+  const pid = await pkg.importPackage(file);
+  const ph = (await store.listItems(pid)).find((i) => i.seq === 1);
+  await same(await store.getMediaBlob(ph.media.original), await store.getMediaBlob(f.m.original));
+});
+
+test('import does not trust estimate().quota (Chrome reports usage + 10 GiB whatever is free)', async () => {
+  const f = await makeFixture('Quota');
+  const file = asFile(await pkg.exportProject(f.p.id));
+  const had = Object.getOwnPropertyDescriptor(navigator, 'storage');
+  Object.defineProperty(navigator, 'storage', { configurable: true, value: { estimate: async () => ({ usage: 5000, quota: 5001 }) } });
+  try {
+    const pid = await pkg.importPackage(file);
+    assert.equal((await store.listItems(pid, { includeDeleted: true })).length, 5);
+  } finally {
+    if (had) Object.defineProperty(navigator, 'storage', had); else delete navigator.storage;
+  }
+});
+
+test('an import holds the jw-import lock the whole time, so another tab does not tidy its files away', { skip: globalThis.navigator?.locks?.query ? false : 'no Web Locks in this Node' }, async () => {
+  const f = await makeFixture('Locked');
+  const file = asFile(await pkg.exportProject(f.p.id));
+  const seen = [];
+  await pkg.importPackage(file, { onProgress: (p) => { if (p.phase === 'media' || p.phase === 'save') seen.push(navigator.locks.query()); } });
+  assert.ok(seen.length > 0);
+  for (const q of await Promise.all(seen)) assert.ok(q.held.some((l) => l.name === 'jw-import'), 'held while files are saved');
+  assert.ok(!(await navigator.locks.query()).held.some((l) => l.name === 'jw-import'), 'let go afterwards');
+});
+
+test('a file the phone could only partly read goes in as read, and is named', async () => {
+  const p = await store.createProject({ name: 'Torn' });
+  const photo = await store.createItem(p.id, { type: 'photo', levelId: p.activeLevelId, createdAt: Date.now() });
+  const big = await store.putMedia(blob(db.PART_SIZE + 5000, 21, 'image/jpeg'), { kind: 'original', projectId: p.id, itemId: photo.id });
+  await store.updateItem(photo.id, (i) => { i.media.original = big; });
+  await db.del('parts', [big, 1]); // a lost part
+  const res = await pkg.exportProject(p.id);
+  assert.equal(res.complete, true, 'no backup could hold more than the phone has');
+  assert.ok(res.warnings.some((w) => /damaged on this phone/.test(w) && /#1 photo/.test(w)), res.warnings.join(' | '));
+  const z = await readZip(res.blob, { verify: true });
+  const man = await z.entry('jobwalk.json').json();
+  assert.equal(man.damaged.length, 1);
+  assert.equal(man.damaged[0].id, big);
+  assert.equal(man.damaged[0].size, db.PART_SIZE);
+  assert.equal(man.damaged[0].expectedSize, db.PART_SIZE + 5000);
+  assert.equal(z.entry(man.damaged[0].path).size, db.PART_SIZE, 'what could be read is in it');
+});
+
+// ---- videos still in pieces ------------------------------------------------------------------------
+
+/** A recording the app could not rebuild yet: its row and three one-second pieces. */
+async function unfinishedVideo(p, { itemId = null } = {}) {
+  const rec = await store.beginRecording({
+    projectId: p.id, levelId: p.levels[0].id, mimeType: 'video/webm', quality: 'high', videoBitsPerSecond: 8000,
+    state: 'recording', aliveAt: 1, track: [{ t: 0, x: 1, y: 2 }], chunkCount: 3, recoveryTries: 3, itemId,
+  });
+  for (let seq = 0; seq < 3; seq++) await store.putChunk(rec.recId, seq, blob(3000 + seq, 30 + seq, 'video/webm'));
+  return rec;
+}
+
+test('a video the app has not finished saving is in the backup as its pieces, and comes back with an import', async () => {
+  const f = await makeFixture('Unfinished video');
+  const rec = await unfinishedVideo(f.p);
+  // A recording already saved as an item is only waiting to be tidied up: not carried twice.
+  const tidy = await unfinishedVideo(f.p, { itemId: f.video.id });
+
+  const est = await pkg.estimateExport(f.p.id);
+  assert.equal(est.counts.unsavedVideos, 1);
+  assert.equal(est.bytes.videos, 200000 + 3 * 1000, 'pieces counted at the bit rate they were filmed at');
+
+  const res = await pkg.exportProject(f.p.id);
+  assert.equal(res.complete, true);
+  assert.ok(res.warnings.some((w) => /not finished saving/.test(w)));
+  const z = await readZip(res.blob, { verify: true });
+  const man = await z.entry('jobwalk.json').json();
+  assert.equal(man.recordings.length, 1);
+  assert.equal(man.recordings[0].row.recId, rec.recId);
+  assert.deepEqual(man.recordings[0].chunks.map((c) => c.path), [0, 1, 2].map((s) => `media/recordings/${rec.recId}/${s}.webm`));
+  const pieces = await store.getRecordingChunks(rec.recId);
+  for (const [n, c] of man.recordings[0].chunks.entries()) await same(await z.entry(c.path).blob(), pieces[n]);
+  assert.ok(!z.entries.some((e) => e.name.includes(tidy.recId)));
+  assert.match(await z.entry('README.txt').text(), /media\/recordings\//);
+
+  // Without videos it is left out like every video, so the copy is not a backup.
+  const small = await pkg.exportProject(f.p.id, { includeVideos: false });
+  assert.equal(small.complete, false);
+  assert.ok(!(await readZip(small.blob)).entries.some((e) => e.name.startsWith('media/recordings/')));
+
+  const pid = await pkg.importPackage(asFile(res));
+  const rows = (await store.listRecordings()).filter((r) => r.projectId === pid);
+  assert.equal(rows.length, 1, 'one recording row for the new copy');
+  const row = rows[0];
+  assert.notEqual(row.recId, rec.recId);
+  assert.equal(row.itemId, null, 'built afresh on this phone');
+  assert.equal(row.levelId, (await store.getProject(pid)).levels[0].id);
+  assert.equal(row.recoveryTries, 3, 'a video that crashed the app waits for "Try again" here too');
+  assert.deepEqual(row.track, rec.track);
+  const back = await store.getRecordingChunks(row.recId);
+  assert.equal(back.length, 3);
+  for (const [n, b] of back.entries()) await same(b, pieces[n]);
+  assert.equal((await store.getRecordingChunks(rec.recId)).length, 3, 'the original pieces are untouched');
+  await store.endRecording(rec.recId);
+  await store.endRecording(tidy.recId);
+  await store.endRecording(row.recId);
 });
 
 test('an import can be cancelled, and nothing of it is left', async () => {
@@ -584,7 +745,7 @@ test('CSV cells, file names, extensions, stamp lines', () => {
 test('estimateExport counts what a backup holds', async () => {
   const f = await makeFixture('Estimate');
   const est = await pkg.estimateExport(f.p.id);
-  assert.deepEqual(est.counts, { photos: 2, videos: 1, notes: 1, voice: 1, plans: 1, levels: 2, deleted: 1 });
+  assert.deepEqual(est.counts, { photos: 2, videos: 1, notes: 1, voice: 1, plans: 1, levels: 2, deleted: 1, unsavedVideos: 0 });
   assert.equal(est.bytes.videos, 200000);
   assert.ok(est.bytes.total > est.bytes.withoutVideos);
   assert.equal(est.bytes.total - est.bytes.withoutVideos, 200000);
@@ -620,7 +781,7 @@ test('viewer helpers: safe paths, formats, playback interpolation, filters', () 
   assert.ok(Math.abs(mid.h - 0) < 1e-9 || Math.abs(mid.h - 360) < 1e-9, 'heading interpolates across north');
   assert.equal(V.trackAt(pts, -5).x, 0);
   assert.equal(V.trackAt(pts, 99999).x, 10);
-  assert.equal(V.planHeadingOf({ heading: 30 }, { northAngle: 40 }), 350);
+  assert.equal(V.planHeadingOf({ heading: 30 }, { northAngle: 40 }), 70, 'heading + northAngle, as calibration.headingToPlan');
   assert.equal(V.planHeadingOf({ planHeading: 12, heading: 30 }, { northAngle: 40 }), 12);
   assert.equal(V.accuracyOf({ planAcc: 50 }, { pxPerMeter: 25 }), 2);
   const item = { seq: 12, type: 'photo', levelId: 'l1', title: 'Header', text: 'Beam at B', tags: ['Walls'], voiceNotes: [{ transcript: 'second floor' }] };

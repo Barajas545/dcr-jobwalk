@@ -9,6 +9,8 @@
 import 'fake-indexeddb/auto';   // only the last test touches the store
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import vm from 'node:vm';
 
 import {
   solveCalibration, enuToPlan, planToEnu, headingToPlan, planHeadingToTrue,
@@ -335,6 +337,24 @@ test('heading conversions match the transform, both ways', () => {
   assert.equal(enuToPlan(null, { e: 0, n: 0 }), null);
 });
 
+test('the exported viewer turns a true heading onto the plan exactly like headingToPlan (its wedges match the app)', () => {
+  const ctx = vm.createContext({});
+  vm.runInContext(fs.readFileSync(new URL('../viewer/viewer.js', import.meta.url), 'utf8'), ctx, { filename: 'viewer.js' });
+  const V = ctx.JobWalkViewer;
+  const r = rng(7);
+  for (let trial = 0; trial < 50; trial++) {
+    const cal = solveCalibration({ pairs: pairsFor(randomTruth(r), TRIANGLE) });
+    const lvl = { northAngle: cal.northAngle };   // what package.js puts in the viewer's data
+    const h = r() * 360;
+    angClose(V.planHeadingOf({ heading: h }, lvl), headingToPlan(cal, h), 1e-9, 'a pin with no stored planHeading');
+    const [pt] = V.trackPoints({ track: [{ t: 0, x: 1, y: 2, heading: h }] }, lvl);
+    angClose(pt.h, headingToPlan(cal, h), 1e-9, 'a video path point');
+  }
+  const cw = solveCalibration({ pairs: pairsFor(makeTruth(20, 90, 0, 0), TRIANGLE) });
+  angClose(V.planHeadingOf({ heading: 0 }, { northAngle: cw.northAngle }), 90, 1e-9, 'north points right');
+  assert.equal(V.planHeadingOf({ planHeading: 12, heading: 30 }, { northAngle: 40 }), 12, 'a stored planHeading wins');
+});
+
 test('planBearing is clockwise from plan up (−y)', () => {
   angClose(planBearing({ x: 0, y: 0 }, { x: 0, y: -10 }), 0, 1e-12);
   angClose(planBearing({ x: 0, y: 0 }, { x: 10, y: 0 }), 90, 1e-12);
@@ -372,7 +392,14 @@ test('reprojectItems moves unlocked pins on the level and leaves the rest alone'
   const out = reprojectItems(items, level, { lat: 38.58, lng: -121.49 }, { previous: oldCal });
   assert.equal(JSON.stringify(items), before, 'the input items are not changed');
   const byId = Object.fromEntries(out.map((o) => [o.id, o]));
-  assert.deepEqual(Object.keys(byId).sort(), ['i_deleted', 'i_photo', 'i_video']);
+  assert.deepEqual(Object.keys(byId).sort(), ['i_deleted', 'i_locked', 'i_photo', 'i_video']);
+
+  // A pin placed by hand keeps its spot; its wedge turns with the new calibration.
+  const l = byId.i_locked.pose;
+  assert.deepEqual(l.plan, items[1].pose.plan, 'a pin placed by hand stays');
+  assert.equal(l.planLocked, true);
+  close(l.planHeading, headingToPlan(newCal, 30), 1e-9);
+  close(l.planAcc, 3 * newCal.pxPerMeter, 1e-9, 'planAcc keeps its size in meters');
 
   const p = byId.i_photo.pose;
   const want = enuToPlan(newCal, { e: 5, n: 7 });
@@ -399,6 +426,35 @@ test('reprojectItems moves unlocked pins on the level and leaves the rest alone'
   assert.deepEqual(reprojectItems(moved, level, null, { previous: newCal }), []);
   // An uncalibrated level moves nothing.
   assert.deepEqual(reprojectItems(items, { id: 'l_1', calibration: null }, null), []);
+});
+
+test('reprojectItems: a pin placed by hand before calibrating gets its wedge; a locked video keeps its path', () => {
+  // North points right on this plan: northAngle 90.
+  const cal = solveCalibration({ pairs: pairsFor(makeTruth(10, 90, 0, 0), TRIANGLE) });
+  close(cal.northAngle, 90, 1e-6);
+  const level = { id: 'l', calibration: cal };
+  const items = [
+    // Pinned on the plan while it was not calibrated yet: no plan heading, the 2 px placeholder accuracy.
+    { id: 'i_pin', levelId: 'l', type: 'photo', pose: { geo: null, enu: null, plan: { x: 1, y: 2 }, planAcc: 2, planLocked: true, heading: 0, planHeading: null } },
+    { id: 'i_vid', levelId: 'l', type: 'video', pose: { enu: { e: 0, n: 0 }, plan: { x: 5, y: 5 }, planLocked: true, heading: 90, planHeading: null },
+      track: [{ t: 0, e: 3, n: 4, x: 50, y: 60, heading: 90, planHeading: null }] },
+    // Locked, with no heading and no accuracy: nothing to update.
+    { id: 'i_note', levelId: 'l', type: 'note', pose: { enu: { e: 1, n: 1 }, plan: { x: 9, y: 9 }, planLocked: true, heading: null, planHeading: null } },
+  ];
+  const out = reprojectItems(items, level, null);
+  const byId = Object.fromEntries(out.map((o) => [o.id, o]));
+  assert.deepEqual(Object.keys(byId).sort(), ['i_pin', 'i_vid']);
+  assert.deepEqual(byId.i_pin.pose.plan, { x: 1, y: 2 });
+  close(byId.i_pin.pose.planHeading, 90, 1e-6, 'true north points right on this plan');
+  close(byId.i_pin.pose.planAcc, 0.3 * cal.pxPerMeter, 1e-9, 'no old scale: the 2 px stand-in becomes a hand-placed 0.3 m');
+  assert.deepEqual(byId.i_vid.pose.plan, { x: 5, y: 5 });
+  close(byId.i_vid.pose.planHeading, 180, 1e-6, 'east points down');
+  assert.equal(byId.i_vid.track[0].x, 50, 'the path of a locked video stays');
+  assert.equal(byId.i_vid.track[0].y, 60);
+  close(byId.i_vid.track[0].planHeading, 180, 1e-6);
+  // Run again on the result: nothing changes.
+  const moved = items.map((i) => (byId[i.id] ? { ...i, pose: byId[i.id].pose, track: byId[i.id].track } : i));
+  assert.deepEqual(reprojectItems(moved, level, null), []);
 });
 
 test('reprojectItems uses lat/lng + origin when a pose has no ENU', () => {
